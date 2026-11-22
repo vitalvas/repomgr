@@ -100,6 +100,16 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		return nil, fmt.Errorf("read %s: %w", keyPath, err)
 	}
 
+	publicKey, err := pgpsign.PublicKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("derive public key from %s: %w", keyPath, err)
+	}
+
+	publicFiles, err := publicKeyFiles(workdir, publicKey)
+	if err != nil {
+		return nil, err
+	}
+
 	public := filepath.Join(workdir, "public")
 
 	cache, err := loadCache(workdir)
@@ -227,6 +237,10 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 			Packages:      info.packages,
 			Architectures: slices.Sorted(maps.Keys(info.archs)),
 		})
+	}
+
+	if err := publishFiles(ctx, workdir, publicFiles, "created"); err != nil {
+		return nil, err
 	}
 
 	if err := publishFiles(ctx, workdir, byHashFiles, "added by-hash"); err != nil {

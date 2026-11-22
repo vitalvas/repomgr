@@ -16,8 +16,9 @@ repomgr deb --workdir /srv/repo init --name "Example Repo" --email repo@example.
 
 `init` creates the workdir layout, writes `config/repo.yaml` with empty
 metadata, and generates the signing key. The key is an OpenPGP v4 Ed25519 key
-with no passphrase. It's stored in `config/signing.asc`, and the public half
-goes to `public/key.gpg`. Running `init` again on the same workdir fails, so it
+with no passphrase, stored in `config/signing.asc`. The public half goes to
+`public/key.gpg` in binary form and to `public/key.asc` in ASCII armor.
+`--email` is optional; without it, the key's user ID is just the name. Running `init` again on the same workdir fails, so it
 never replaces a key your clients already trust.
 
 ### Add a package
@@ -64,6 +65,9 @@ architectures that no longer have packages. It fails without touching
 `dists/` if a pool file isn't at the path its control data gives, or if two
 files share a name but differ in content.
 
+`build` also restores `public/key.gpg` and `public/key.asc` from
+`config/signing.asc` when either file is missing or differs.
+
 `build` caches parsed packages in `cache/index.json` and only re-reads files
 whose size or modification time changed. You can delete `cache/` at any time.
 
@@ -77,7 +81,8 @@ whose size or modification time changed. You can delete `cache/` at any time.
   cache/
     index.json      parsed package cache
   public/
-    key.gpg         public key for apt
+    key.gpg         binary public key for a Signed-By keyring file
+    key.asc         ASCII-armored public key for an inline Signed-By
     pool/           packages
     dists/          indexes and signatures
 ```
@@ -88,6 +93,12 @@ Publish `public/` and keep `config/` private. The `Origin`, `Label`,
 [repository metadata section of the design](docs/superpowers/specs/2026-11-21-deb-repomgr-design.md#repository-metadata-file).
 
 ## Use the repository with apt
+
+You can point `Signed-By` at a keyring file, which works on every supported
+release, or embed the key in the source file, which needs Ubuntu 22.04 or
+Debian 12 and newer.
+
+### Signed-By with a keyring file
 
 Download the public key on the client:
 
@@ -112,6 +123,35 @@ The one-line format works too:
 deb [signed-by=/etc/apt/keyrings/repo.gpg] https://repo.example.com/ noble main
 ```
 
+### Signed-By with an embedded key
+
+On Ubuntu 22.04, Debian 12, and newer, you can put the key directly in the
+source file and skip the separate keyring. Use the armored `key.asc`. In the
+`Signed-By` value, start every line with a space and write the empty line as
+` .`. This command prints the key in that form:
+
+```shell
+curl -fsSL https://repo.example.com/key.asc | sed -e 's/^$/./' -e 's/^/ /'
+```
+
+Paste the output under `Signed-By:`:
+
+```text
+Types: deb
+URIs: https://repo.example.com/
+Suites: noble
+Components: main
+Signed-By:
+ -----BEGIN PGP PUBLIC KEY BLOCK-----
+ .
+ xjMEawJAJBYJKwYBBAHaRw8BAQdAUWa6BPpbJn/aXaGEfPRrty8XL8+lR22JfNje
+ ...
+ -----END PGP PUBLIC KEY BLOCK-----
+```
+
+Ubuntu 20.04 and Debian 10 and 11 don't accept an embedded key. Use the keyring
+file there.
+
 ## Logging
 
 Each command logs to stderr with `log/slog`. Every change gets an info line
@@ -123,6 +163,8 @@ with a workdir-relative `path`:
 - `build` logs:
   - `parsed` for each package it reads;
   - `cache dropped` for each package that left the pool;
+  - `created` or `updated` for `public/key.gpg` and `public/key.asc` when it
+    restores the key;
   - `added by-hash`, `updated`, `removed by-hash`, and `removed stale` for
     what it changes under `dists/`;
   - one `built` line per suite.

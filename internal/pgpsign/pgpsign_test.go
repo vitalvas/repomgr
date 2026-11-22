@@ -2,9 +2,11 @@ package pgpsign
 
 import (
 	"bytes"
+	"io"
 	"testing"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp/armor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +59,16 @@ func TestGenerateKey(t *testing.T) {
 		}
 	})
 
+	t.Run("empty email gives a name-only user id", func(t *testing.T) {
+		nameOnly, err := GenerateKey("Repo Signer", "")
+		require.NoError(t, err)
+
+		list, err := openpgp.ReadKeyRing(bytes.NewReader(nameOnly.Public))
+		require.NoError(t, err)
+		require.Len(t, list, 1)
+		assert.Contains(t, list[0].Identities, "Repo Signer")
+	})
+
 	t.Run("armored private key reads back", func(t *testing.T) {
 		assert.True(t, bytes.HasPrefix(key.Private, []byte("-----BEGIN PGP PRIVATE KEY BLOCK-----")))
 
@@ -78,6 +90,47 @@ func TestGenerateKey(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestPublicKey(t *testing.T) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(t, err)
+
+	t.Run("matches the generated public key", func(t *testing.T) {
+		public, err := PublicKey(key.Private)
+		require.NoError(t, err)
+		assert.Equal(t, key.Public, public)
+	})
+
+	t.Run("invalid private key", func(t *testing.T) {
+		for name, input := range map[string][]byte{"garbage": []byte("not a key"), "binary public key": key.Public} {
+			t.Run(name, func(t *testing.T) {
+				_, err := PublicKey(input)
+				assert.Error(t, err)
+			})
+		}
+	})
+}
+
+func TestArmorPublicKey(t *testing.T) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(t, err)
+
+	armored, err := ArmorPublicKey(key.Public)
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(armored, []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----\n")))
+
+	block, err := armor.Decode(bytes.NewReader(armored))
+	require.NoError(t, err)
+	assert.Equal(t, openpgp.PublicKeyType, block.Type)
+
+	body, err := io.ReadAll(block.Body)
+	require.NoError(t, err)
+	assert.Equal(t, key.Public, body)
+
+	again, err := ArmorPublicKey(key.Public)
+	require.NoError(t, err)
+	assert.Equal(t, armored, again)
 }
 
 func BenchmarkGenerateKey(b *testing.B) {

@@ -249,11 +249,13 @@ SHA256: %s
 	t.Run("corrupt signing key leaves dists untouched", func(t *testing.T) {
 		workdir := newWorkdir(t)
 		addPkg(t, workdir, "s", "c", ctl("foo", "1.0", ""))
+		key := readPublic(t, workdir, "key.gpg")
 		require.NoError(t, os.WriteFile(filepath.Join(workdir, "config", "signing.asc"), []byte("garbage"), 0o600))
 
 		_, err := Build(t.Context(), workdir, buildTime)
-		require.ErrorContains(t, err, "sign release for suite s")
+		require.ErrorContains(t, err, "derive public key")
 		assert.NoDirExists(t, filepath.Join(workdir, "public", "dists"))
+		assert.Equal(t, key, readPublic(t, workdir, "key.gpg"))
 	})
 
 	t.Run("signed metadata verifies", func(t *testing.T) {
@@ -716,6 +718,27 @@ func TestStanza(t *testing.T) {
 
 	got := stanza("Version: 1\npAcKaGe: foo\nFilename: old\n obsolete\nsIzE: 99\nSHA256: old\nDescription: foo\n more", "pool/x.deb", pkg)
 	assert.Equal(t, "pAcKaGe: foo\nVersion: 1\nDescription: foo\n more\nFilename: pool/x.deb\nSize: 7\nMD5sum: m\nSHA1: s1\nSHA256: s256", got)
+}
+
+func TestBuildRestoresPublicKey(t *testing.T) {
+	workdir := newWorkdir(t)
+	original := readPublic(t, workdir, "key.gpg")
+	originalArmored := readPublic(t, workdir, "key.asc")
+
+	require.NoError(t, os.RemoveAll(filepath.Join(workdir, "public")))
+
+	logs := captureLogs(t)
+	_, err := Build(t.Context(), workdir, buildTime)
+	require.NoError(t, err)
+	assert.Equal(t, original, readPublic(t, workdir, "key.gpg"))
+	assert.Equal(t, originalArmored, readPublic(t, workdir, "key.asc"))
+	assert.Contains(t, logs.String(), "msg=created path=public/key.gpg")
+	assert.Contains(t, logs.String(), "msg=created path=public/key.asc")
+
+	logs.Reset()
+	_, err = Build(t.Context(), workdir, buildTime)
+	require.NoError(t, err)
+	assert.NotContains(t, logs.String(), "public/key.")
 }
 
 func TestBuildBadPoolKeepsPublishedSuite(t *testing.T) {

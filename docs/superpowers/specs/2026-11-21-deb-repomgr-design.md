@@ -7,7 +7,7 @@ published tree that APT clients consume.
 ## Commands
 
 ```text
-repomgr deb --workdir <workdir> init --name <name> --email <email>
+repomgr deb --workdir <workdir> init --name <name> [--email <email>]
 repomgr deb --workdir <workdir> add --suite <suite> --component <component> <file.deb>
 repomgr deb --workdir <workdir> build
 ```
@@ -50,7 +50,8 @@ compiles. `golang.org/x/crypto` v0.59.0 no longer ships `openpgp`.
   cache/
     index.json             pool path -> size, mtime, control fields, checksums
   public/
-    key.gpg                binary OpenPGP public key for Signed-By
+    key.gpg                binary OpenPGP public key for a Signed-By keyring file
+    key.asc                ASCII-armored public key for an embedded Signed-By
     pool/<suite>/<component>/<prefix>/<name>/<Package>_<Version>_<Architecture>.deb
     dists/<suite>/
       InRelease
@@ -112,8 +113,10 @@ that name are a conflict.
    client.
 2. Create `config/`, `cache/`, and `public/`.
 3. Write `config/repo.yaml` with empty `origin`, `label`, and `description`.
-4. Generate a v4 Ed25519 key with user ID `<name> <<email>>` and no expiry.
-5. Write `config/signing.asc` with mode 0600 and `public/key.gpg`.
+4. Generate a v4 Ed25519 key with user ID `<name> <<email>>`, or `<name>` when
+   `--email` is empty, and no expiry.
+5. Write `public/key.gpg` and `public/key.asc`, then `config/signing.asc` with
+   mode 0600.
 
 ### add
 
@@ -130,7 +133,8 @@ that name are a conflict.
 
 ### build
 
-1. Load `config/repo.yaml`, `config/signing.asc`, and `cache/index.json`.
+1. Load `config/repo.yaml`, `config/signing.asc`, and `cache/index.json`, and
+   derive the public key from `signing.asc`.
 2. Walk `pool/`. Reuse a valid cache entry when size and mtime match. Otherwise,
    parse and hash the file again. Drop entries for missing files and save the cache.
 3. Fail if a package isn't at the path its control fields produce, or if the
@@ -141,7 +145,8 @@ that name are a conflict.
    per-directory `Release`, the top-level `Release`, `InRelease`, and
    `Release.gpg` in memory. A failure up to this step leaves `dists/` as it
    was.
-6. Write missing by-hash files and atomically repair any current by-hash files
+6. Write `public/key.gpg` and `public/key.asc` when either is missing or
+   differs from the derived public key. Write missing by-hash files and atomically repair any current by-hash files
    whose content differs from the rendered index.
 7. Replace the canonical `Packages`, `Packages.gz`, `Packages.zst`, and
    per-directory `Release` files with a temporary file and rename.
@@ -248,6 +253,8 @@ on every publish, so no cache serves an older `InRelease` for long.
   signature of `Release`.
 - `public/key.gpg` is a binary public key. Its first byte is `0x98` or `0xc6`,
   which APT accepts for key files that don't end in `.asc`.
+- `public/key.asc` is the same key in ASCII armor. APT accepts an embedded key
+  in `Signed-By` only in this form, and only from Ubuntu 22.04 and Debian 12.
 
 You use the key like this:
 
@@ -281,6 +288,8 @@ rename. `add` writes the entry for the file it adds.
   workdir-relative `path`:
   - `parsed` for a package read because the cache had no matching entry.
   - `cache dropped` for a cache entry whose pool file is gone.
+  - `created` or `updated` for `public/key.gpg` and `public/key.asc` when
+    either was missing or differed.
   - `added by-hash` and `removed by-hash` for by-hash files.
   - `updated` for each `dists/` file it writes.
   - `removed stale` for each directory it deletes.

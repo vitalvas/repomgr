@@ -65,14 +65,15 @@ func Init(ctx context.Context, workdir, name, email string) error {
 		slog.InfoContext(ctx, "kept", "path", logPath(workdir, configPath))
 	}
 
-	publicPath := filepath.Join(workdir, "public", "key.gpg")
-
-	err = writeAtomic(publicPath, bytes.NewReader(key.Public), 0o644, nil)
+	publicFiles, err := publicKeyFiles(workdir, key.Public)
 	if err != nil {
 		return err
 	}
 
-	slog.InfoContext(ctx, "created", "path", logPath(workdir, publicPath))
+	err = publishFiles(ctx, workdir, publicFiles, "created")
+	if err != nil {
+		return err
+	}
 
 	// signing.asc is written last: its presence marks the workdir as initialized.
 	err = writeAtomic(keyPath, bytes.NewReader(key.Private), 0o600, nil)
@@ -83,4 +84,18 @@ func Init(ctx context.Context, workdir, name, email string) error {
 	slog.InfoContext(ctx, "created", "path", logPath(workdir, keyPath))
 
 	return nil
+}
+
+// publicKeyFiles returns public/key.gpg for keyring files and public/key.asc
+// for keys embedded in Signed-By.
+func publicKeyFiles(workdir string, public []byte) ([]outputFile, error) {
+	armored, err := pgpsign.ArmorPublicKey(public)
+	if err != nil {
+		return nil, err
+	}
+
+	return []outputFile{
+		{path: filepath.Join(workdir, "public", "key.gpg"), data: public},
+		{path: filepath.Join(workdir, "public", "key.asc"), data: armored},
+	}, nil
 }

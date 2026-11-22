@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.vitalvas.com/repomgr/internal/pgpsign"
 )
 
 const wantConfig string = "origin: \"\"\nlabel: \"\"\ndescription: \"\"\n"
@@ -22,6 +23,7 @@ func TestInit(t *testing.T) {
 		out := logs.String()
 		assert.Contains(t, out, "msg=created path=config/repo.yaml\n")
 		assert.Contains(t, out, "msg=created path=public/key.gpg\n")
+		assert.Contains(t, out, "msg=created path=public/key.asc\n")
 		assert.Contains(t, out, "msg=created path=config/signing.asc\n")
 		assert.NotContains(t, out, "PGP")
 
@@ -52,6 +54,13 @@ func TestInit(t *testing.T) {
 		pubInfo, err := os.Stat(filepath.Join(workdir, "public", "key.gpg"))
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o644), pubInfo.Mode().Perm())
+
+		armored, err := os.ReadFile(filepath.Join(workdir, "public", "key.asc"))
+		require.NoError(t, err)
+
+		want, err := pgpsign.ArmorPublicKey(public)
+		require.NoError(t, err)
+		assert.Equal(t, want, armored)
 	})
 
 	t.Run("second run fails and keeps key", func(t *testing.T) {

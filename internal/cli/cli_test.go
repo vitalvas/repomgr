@@ -118,9 +118,6 @@ func TestEmptyRequiredOptions(t *testing.T) {
 
 	err = run(t, "deb", "--workdir", dir, "init", "--name=", "--email", "repo@example.com")
 	require.ErrorContains(t, err, "--name")
-
-	err = run(t, "deb", "--workdir", dir, "init", "--name", "Repo", "--email=")
-	require.ErrorContains(t, err, "--email")
 	assert.NoDirExists(t, filepath.Join(dir, "config"))
 }
 
@@ -169,9 +166,18 @@ func TestDebInit(t *testing.T) {
 		assert.Error(t, run(t, "deb", "--workdir", t.TempDir(), "init", "--email", "repo@example.com"))
 	})
 
-	t.Run("missing email fails", func(t *testing.T) {
-		assert.Error(t, run(t, "deb", "--workdir", t.TempDir(), "init", "--name", "Repo"))
-	})
+	for name, args := range map[string][]string{
+		"without email":     {"--name", "Repo"},
+		"empty email value": {"--name", "Repo", "--email="},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+
+			require.NoError(t, run(t, append([]string{"deb", "--workdir", dir, "init"}, args...)...))
+			assert.FileExists(t, filepath.Join(dir, "config", "signing.asc"))
+			assert.FileExists(t, filepath.Join(dir, "public", "key.gpg"))
+		})
+	}
 
 	t.Run("invalid name creates no key", func(t *testing.T) {
 		dir := t.TempDir()

@@ -18,7 +18,7 @@ type debConfig struct {
 
 type initConfig struct {
 	Name  string `long:"name" required:"true" description:"signing key owner name"`
-	Email string `long:"email" required:"true" description:"signing key owner email"`
+	Email string `long:"email" description:"signing key owner email, optional"`
 }
 
 type addConfig struct {
@@ -103,7 +103,6 @@ func New(version string) (*xflags.Parser, error) {
 	err = errors.Join(
 		deb.Validate("workdir", nonEmpty),
 		initCmd.Validate("name", nonEmpty),
-		initCmd.Validate("email", nonEmpty),
 		deb.AddCommand(initCmd),
 		deb.AddCommand(addCmd),
 		deb.AddCommand(buildCmd),
