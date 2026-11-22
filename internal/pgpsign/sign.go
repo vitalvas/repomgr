@@ -65,7 +65,7 @@ func Verify(public, message []byte, signed Signed) error {
 		return fmt.Errorf("verify detached signature: %w", err)
 	}
 
-	plaintext, err := VerifyClear(public, signed.Clear)
+	plaintext, err := verifyClear(keyring, signed.Clear)
 	if err != nil {
 		return err
 	}
@@ -85,7 +85,7 @@ func VerifyClear(public, signed []byte) ([]byte, error) {
 		err     error
 	)
 
-	if bytes.Contains(public, []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----")) {
+	if bytes.HasPrefix(bytes.TrimSpace(public), []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----")) {
 		keyring, err = openpgp.ReadArmoredKeyRing(bytes.NewReader(public))
 	} else {
 		keyring, err = openpgp.ReadKeyRing(bytes.NewReader(public))
@@ -95,12 +95,16 @@ func VerifyClear(public, signed []byte) ([]byte, error) {
 		return nil, fmt.Errorf("read public key: %w", err)
 	}
 
+	return verifyClear(keyring, signed)
+}
+
+func verifyClear(keyring openpgp.EntityList, signed []byte) ([]byte, error) {
 	block, _ := clearsign.Decode(signed)
 	if block == nil {
 		return nil, errNoClearsign
 	}
 
-	_, err = block.VerifySignature(keyring, nil)
+	_, err := block.VerifySignature(keyring, nil)
 	if err != nil {
 		return nil, fmt.Errorf("verify clearsigned message: %w", err)
 	}

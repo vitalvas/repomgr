@@ -44,25 +44,29 @@ version, not only the newest.
    (`all`, `amd64`, `arm64`, `armel`, `armhf`, `i386`) and ignore the rest. Fail
    if none remain.
 4. For each of those architectures, fetch the first of
-   `<component>/binary-<arch>/Packages.zst`, `Packages.gz`, and `Packages` that
-   the `SHA256` section of `Release` lists. Fail if none is listed. Check the
-   downloaded file's size and SHA256 against `Release`, then decompress it.
+   `<component>/binary-<arch>/Packages.zst`, `Packages.gz`, and `Packages`
+   that the `SHA256` section of `Release` lists. Skip architectures
+   without a listed index for the component. Fail if no supported index is
+   listed for the component. Check the downloaded file's size and SHA256
+   against `Release`, then decompress it.
 5. Split each index into stanzas and drop duplicates by `Filename`, because
    upstreams repeat `Architecture: all` packages in every `binary-<arch>`
-   index. A stanza without `Filename`, `Size`, or `SHA256` is fatal.
+   index. A stanza without `Filename`, `Size`, or `SHA256` is fatal, as is a
+   repeated filename with conflicting metadata.
 6. Apply the filters to the stanza's `Package`, `Version`, and `Architecture`
    fields exactly as upstream writes them. Each filter must match the whole
-   field value, as if wrapped in `^(?:...)$`. The version keeps its epoch, so
-   `1:3006.0` doesn't match `3006.*`.
+   field value. The version keeps its epoch, so `1:3006.0` doesn't match
+   `3006.*`.
 7. Compute the local pool path from the stanza with the same rules as `add`.
-   If that file exists with the stanza's SHA256, count it as unchanged and
-   don't download it.
+   If that file matches the stanza's size, SHA256, and package identity,
+   count it as unchanged and skip the download.
 8. If that file exists with a different SHA256 and `--force` isn't set, the
    package fails with `ErrConflict`.
 9. Otherwise, download `<source-repo>/<Filename>` to a temporary file under
-   `cache/`, check its size and SHA256 against the stanza, and add it to the
-   target suite and component. The add parses the control data, checks for
-   conflicts with the rest of the pool, writes the file atomically, and
+   `cache/`, check its size, SHA256, and package identity against the stanza,
+   and add it to the target suite and component. The add parses the control
+   data, checks for conflicts with the rest of the pool, writes the file
+   atomically, and
    updates `cache/index.json`. The temporary file is removed on every success
    and error path. A killed process can leave a `cache/.mirror-*.deb` behind.
    It is safe to delete.
@@ -77,9 +81,8 @@ Downloads run one at a time.
 ## Filters
 
 Each filter is a Go regular expression that must match the whole value of the
-package control field. The pattern behaves as if it were wrapped in
-`^(?:...)$`. Name means the `Package` field, not the file name. An empty value
-means no filter. Field names in the upstream `InRelease` and `Packages`, and in
+package control field. The name filters match the `Package` field. An empty
+value means no filter. Field names in the upstream `InRelease` and `Packages`, and in
 package control files, are matched case-insensitively, as in deb822.
 
 | Flag | Field | Default |
@@ -120,13 +123,13 @@ These errors stop the command before it downloads any package:
 - `InRelease` isn't clearsigned, or its signature doesn't verify.
 - The component isn't listed in `Components`.
 - No supported architecture is listed in `Architectures`.
-- An index is missing from `Release`, or its size or SHA256 doesn't match.
+- No supported index is listed, or a listed index's size or SHA256 doesn't match.
 - A stanza lacks `Filename`, `Size`, or `SHA256`.
 
 These errors fail only the package they belong to:
 
 - The package download returns an HTTP error.
-- The downloaded size or SHA256 doesn't match the stanza.
+- The package size, SHA256, or identity doesn't match the stanza.
 - The add fails, for example on a conflict, an invalid package, or an
   unsupported field value.
 

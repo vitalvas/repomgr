@@ -118,23 +118,23 @@ repomgr deb-mirror --workdir /srv/repo \
 repomgr deb --workdir /srv/repo build
 ```
 
-It reads `dists/<source-suite>/InRelease`, then the package index of every
-supported architecture the upstream lists. For each architecture it takes
-`Packages.zst`, `Packages.gz`, or plain `Packages`, in that order of
-preference. It checks each index against the SHA256 in `Release` and each
-downloaded `.deb` against the size and SHA256 in the index. Then it adds the
-package to `--target-suite` and `--target-component` the same way `add` does.
+It reads `dists/<source-suite>/InRelease`, then the listed package indexes for
+supported architectures. It prefers `Packages.zst`, then `Packages.gz`, then
+plain `Packages`. At least one supported index must be
+listed for the component. It checks each index against the size and SHA256 in
+`Release` and each `.deb` against the size, SHA256, and package identity in the
+index. Then it adds the package to `--target-suite` and `--target-component`
+the same way `add` does.
 It doesn't build indexes, so run `build` after your mirror runs.
 
 The mirror only adds. It never deletes local packages, even when upstream drops
-them. It copies every matching version, and skips packages that are already in
-the pool with the same SHA256 without downloading them again.
+them. It copies every matching version and skips downloading packages already
+in the pool that match the index.
 
 These flags select packages. Each one is a Go regular expression that must
-match the whole value of the package control field. The pattern behaves as if
-it were wrapped in `^(?:...)$`. Name means the `Package` field, not the file
-name. An empty value means no filter, and an invalid pattern fails before any
-request:
+match the whole value of the package control field. The name filters match the
+`Package` field. An empty value means no filter, and an invalid pattern fails
+before any request:
 
 | Flag | Field | Default |
 | --- | --- | --- |

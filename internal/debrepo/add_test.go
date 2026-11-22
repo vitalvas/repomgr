@@ -149,6 +149,7 @@ func TestAdd(t *testing.T) {
 		replaced, err := Add(workdir, "stable", "main", other, true)
 		require.NoError(t, err)
 		assert.True(t, replaced.Added)
+		assert.True(t, replaced.Replaced)
 		assert.Equal(t, res.Path, replaced.Path)
 
 		target := filepath.Join(workdir, "public", res.Path)
@@ -161,6 +162,32 @@ func TestAdd(t *testing.T) {
 		cache, err := loadCache(workdir)
 		require.NoError(t, err)
 		assert.Equal(t, hexSum(want), cache[res.Path].SHA256)
+		assertNoTemp(t, filepath.Dir(target), 1)
+	})
+
+	t.Run("replacement keeps the original when cache cannot be written", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("permission checks do not apply to root")
+		}
+
+		workdir := newWorkdir(t)
+		first := writeDeb(t, ctl("foo", "1.0", ""))
+		other := writeDeb(t, ctl("foo", "1.0", "Description: different\n"))
+		res, err := Add(workdir, "stable", "main", first, false)
+		require.NoError(t, err)
+
+		cacheDir := filepath.Join(workdir, "cache")
+		require.NoError(t, os.Chmod(cacheDir, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(cacheDir, 0o755) })
+
+		_, err = Add(workdir, "stable", "main", other, true)
+		require.ErrorIs(t, err, os.ErrPermission)
+		target := filepath.Join(workdir, "public", res.Path)
+		want, err := os.ReadFile(first)
+		require.NoError(t, err)
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
 		assertNoTemp(t, filepath.Dir(target), 1)
 	})
 

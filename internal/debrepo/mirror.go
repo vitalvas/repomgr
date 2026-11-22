@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -59,11 +61,17 @@ type filterPair struct {
 }
 
 func (p filterPair) selected(value string) bool {
-	if p.include != nil && !p.include.MatchString(value) {
+	if p.include != nil && !matchesWhole(p.include, value) {
 		return false
 	}
 
-	return p.exclude == nil || !p.exclude.MatchString(value)
+	return p.exclude == nil || !matchesWhole(p.exclude, value)
+}
+
+func matchesWhole(re *regexp.Regexp, value string) bool {
+	match := re.FindStringIndex(value)
+
+	return match != nil && match[0] == 0 && match[1] == len(value)
 }
 
 func (f mirrorFilters) wants(fields map[string]string) bool {
@@ -72,16 +80,17 @@ func (f mirrorFilters) wants(fields map[string]string) bool {
 		f.architecture.selected(fields["architecture"])
 }
 
-// compileFilter anchors the pattern so it matches the whole value. It first
-// compiles the raw pattern, because a pattern such as "a)|(b" is invalid alone
-// but compiles once wrapped, and would then not anchor.
 func compileFilter(flag, pattern string) (*regexp.Regexp, error) {
-	_, err := regexp.Compile(pattern)
+	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, fmt.Errorf("invalid --%s %q: %w", flag, pattern, err)
 	}
 
-	return regexp.Compile(fmt.Sprintf("^(?:%s)$", pattern))
+	// Try the longest alternative at the first match position so a shorter
+	// alternative cannot hide a match that spans the whole field.
+	re.Longest()
+
+	return re, nil
 }
 
 func (o MirrorOptions) compileFilters() (mirrorFilters, error) {
@@ -152,9 +161,16 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 		return MirrorResult{}, err
 	}
 
-	repo := strings.TrimSuffix(opts.SourceRepo, "/")
+	repo, err := url.Parse(opts.SourceRepo)
+	if err != nil || repo.Hostname() == "" || (repo.Scheme != "http" && repo.Scheme != "https") || repo.Fragment != "" {
+		return MirrorResult{}, errors.New("source repository must be an HTTP or HTTPS base URL")
+	}
 
-	distBase := fmt.Sprintf("%s/dists/%s", repo, opts.SourceSuite)
+	if !validRepoPath(opts.SourceSuite) || !validRepoPath(opts.SourceComponent) {
+		return MirrorResult{}, errors.New("source suite and component must be relative repository paths")
+	}
+
+	distBase := repoPath(repo, fmt.Sprintf("dists/%s", opts.SourceSuite))
 
 	entries, err := fetchEntries(ctx, distBase, opts.SourceComponent, opts.SourceKey)
 	if err != nil {
@@ -164,12 +180,20 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 	var res MirrorResult
 
 	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+
 		if !filters.wants(e.fields) {
 			continue
 		}
 
-		add, replaced, err := mirrorPackage(ctx, workdir, repo, opts, e)
+		add, err := mirrorPackage(ctx, workdir, repo, opts, e)
 		if err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+
 			res.Failed++
 
 			slog.ErrorContext(ctx, "mirror failed", "filename", e.filename, "error", err)
@@ -183,7 +207,7 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 			continue
 		}
 
-		if replaced {
+		if add.Replaced {
 			res.Replaced++
 
 			slog.InfoContext(ctx, "replaced", "path", path.Join("public", add.Path))
@@ -201,6 +225,25 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 	}
 
 	return res, nil
+}
+
+func validRepoPath(name string) bool {
+	return name != "." && fs.ValidPath(name) && !strings.ContainsAny(name, "\\\n\r\t\x00")
+}
+
+// repoPath appends name to base without cleaning, because URL.JoinPath would
+// collapse "//" in a base path that the upstream expects verbatim.
+func repoPath(base *url.URL, name string) *url.URL {
+	parts := strings.Split(name, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+
+	u := *base
+	u.Path = fmt.Sprintf("%s/%s", strings.TrimSuffix(base.Path, "/"), name)
+	u.RawPath = fmt.Sprintf("%s/%s", strings.TrimSuffix(base.EscapedPath(), "/"), strings.Join(parts, "/"))
+
+	return &u
 }
 
 func getOK(ctx context.Context, url string) (*http.Response, error) {
@@ -241,11 +284,10 @@ func getBytes(ctx context.Context, url string) ([]byte, error) {
 	return data, nil
 }
 
-// fetchEntries reads InRelease and, for every supported architecture, the
-// Packages index (zst, gz, then plain, the first one Release lists). It
-// returns the packages deduplicated by Filename.
-func fetchEntries(ctx context.Context, distBase, component string, sourceKey []byte) ([]mirrorEntry, error) {
-	body, err := getBytes(ctx, fmt.Sprintf("%s/InRelease", distBase))
+// fetchEntries reads InRelease and the listed Packages indexes for supported
+// architectures. It returns the packages deduplicated by Filename.
+func fetchEntries(ctx context.Context, distBase *url.URL, component string, sourceKey []byte) ([]mirrorEntry, error) {
+	body, err := getBytes(ctx, repoPath(distBase, "InRelease").String())
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +337,9 @@ func fetchEntries(ctx context.Context, distBase, component string, sourceKey []b
 
 	var entries []mirrorEntry
 
-	seen := map[string]bool{}
+	seen := map[string]mirrorEntry{}
+
+	indexes := 0
 
 	for _, arch := range archs {
 		indexPath := fmt.Sprintf("%s/binary-%s/Packages", component, arch)
@@ -305,12 +349,28 @@ func fetchEntries(ctx context.Context, distBase, component string, sourceKey []b
 			return nil, err
 		}
 
-		for _, e := range found {
-			if !seen[e.filename] {
-				seen[e.filename] = true
-				entries = append(entries, e)
-			}
+		if found == nil {
+			continue
 		}
+
+		indexes++
+
+		for _, e := range found {
+			if previous, ok := seen[e.filename]; ok {
+				if previous.size != e.size || previous.sha256 != e.sha256 || checkIndexControl(previous.fields, e.fields) != nil {
+					return nil, fmt.Errorf("conflicting index entries for %s", e.filename)
+				}
+
+				continue
+			}
+
+			seen[e.filename] = e
+			entries = append(entries, e)
+		}
+	}
+
+	if indexes == 0 {
+		return nil, fmt.Errorf("source Release does not list a supported Packages index for %s", component)
 	}
 
 	return entries, nil
@@ -329,18 +389,27 @@ func parseReleaseHashes(field string) (map[string]releaseFile, error) {
 			return nil, fmt.Errorf("malformed Release SHA256 line %q", line)
 		}
 
+		if !validChecksum(parts[0], sha256.Size*2) {
+			return nil, fmt.Errorf("malformed Release SHA256 checksum in %q", line)
+		}
+
 		size, err := strconv.ParseInt(parts[1], 10, 64)
 		if err != nil || size < 0 {
 			return nil, fmt.Errorf("malformed Release SHA256 size in %q", line)
 		}
 
-		files[parts[2]] = releaseFile{sha256: parts[0], size: size}
+		entry := releaseFile{sha256: strings.ToLower(parts[0]), size: size}
+		if previous, ok := files[parts[2]]; ok && previous != entry {
+			return nil, fmt.Errorf("conflicting Release SHA256 entries for %s", parts[2])
+		}
+
+		files[parts[2]] = entry
 	}
 
 	return files, nil
 }
 
-func fetchIndex(ctx context.Context, distBase, indexPath string, files map[string]releaseFile) ([]mirrorEntry, error) {
+func fetchIndex(ctx context.Context, distBase *url.URL, indexPath string, files map[string]releaseFile) ([]mirrorEntry, error) {
 	var (
 		suffix string
 		want   releaseFile
@@ -355,32 +424,45 @@ func fetchIndex(ctx context.Context, distBase, indexPath string, files map[strin
 	}
 
 	if !ok {
-		return nil, fmt.Errorf("source Release does not list %s", indexPath)
+		return nil, nil
 	}
 
 	indexPath += suffix
 
-	data, err := getBytes(ctx, fmt.Sprintf("%s/%s", distBase, indexPath))
+	resp, err := getOK(ctx, repoPath(distBase, indexPath).String())
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
 
-	sum := sha256.Sum256(data)
-	if int64(len(data)) != want.size || hex.EncodeToString(sum[:]) != want.sha256 {
-		return nil, fmt.Errorf("%s: size or SHA256 mismatch with Release", indexPath)
+	var data bytes.Buffer
+
+	err = copySized(&data, resp.Body, want.size)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", indexPath, err)
 	}
 
-	text, err := decompressIndex(data, suffix)
+	sum := sha256.Sum256(data.Bytes())
+	if hex.EncodeToString(sum[:]) != want.sha256 {
+		return nil, fmt.Errorf("%s: SHA256 mismatch with Release", indexPath)
+	}
+
+	index, err := decompressIndex(data.Bytes(), suffix)
 	if err != nil {
 		return nil, fmt.Errorf("decompress %s: %w", indexPath, err)
 	}
 
-	var entries []mirrorEntry
+	return parseIndex(index, indexPath)
+}
+
+func parseIndex(text []byte, indexPath string) ([]mirrorEntry, error) {
+	entries := []mirrorEntry{}
 
 	var paragraph []string
 
 	// Under deb822 any run of empty or whitespace-only lines separates paragraphs.
 	for line := range strings.SplitSeq(fmt.Sprintf("%s\n", text), "\n") {
+		line = strings.TrimSuffix(line, "\r")
 		if strings.Trim(line, " \t") != "" {
 			paragraph = append(paragraph, line)
 
@@ -445,52 +527,79 @@ func parseIndexEntry(paragraph string) (mirrorEntry, error) {
 		return mirrorEntry{}, fmt.Errorf("package %q has invalid Size %q", f["package"], f["size"])
 	}
 
-	return mirrorEntry{filename: f["filename"], size: size, sha256: f["sha256"], fields: f}, nil
+	filename := strings.TrimPrefix(f["filename"], "./")
+	if !validRepoPath(filename) {
+		return mirrorEntry{}, fmt.Errorf("package %q has invalid Filename %q", f["package"], f["filename"])
+	}
+
+	return mirrorEntry{filename: filename, size: size, sha256: strings.ToLower(f["sha256"]), fields: f}, nil
 }
 
-// mirrorPackage adds one package. A zero AddResult means the pool already
-// holds the same bytes and nothing was requested; replaced reports that a
-// differing file was overwritten (only with Force).
-func mirrorPackage(ctx context.Context, workdir, repo string, opts MirrorOptions, e mirrorEntry) (AddResult, bool, error) {
+func mirrorPackage(ctx context.Context, workdir string, repo *url.URL, opts MirrorOptions, e mirrorEntry) (AddResult, error) {
 	rel, err := poolPath(opts.TargetSuite, opts.TargetComponent, e.fields)
 	if err != nil {
-		return AddResult{}, false, err
+		return AddResult{}, err
 	}
 
-	existing, err := fileSHA256(filepath.Join(workdir, "public", filepath.FromSlash(rel)))
+	target := filepath.Join(workdir, "public", filepath.FromSlash(rel))
+	existing, size, err := fileSHA256(target)
 	if err == nil && existing == e.sha256 {
-		return AddResult{}, false, nil
+		if size != e.size {
+			return AddResult{}, fmt.Errorf("%s: size mismatch with index", rel)
+		}
+
+		if err := checkExistingControl(target, e.fields); err != nil {
+			return AddResult{}, fmt.Errorf("%s: %w", rel, err)
+		}
+
+		return AddResult{Path: rel}, nil
 	}
 
-	differs := err == nil
-	if differs && !opts.Force {
-		return AddResult{}, false, fmt.Errorf("mirror %s: %w", rel, ErrConflict)
+	if err == nil && !opts.Force {
+		return AddResult{}, fmt.Errorf("mirror %s: %w", rel, ErrConflict)
+	}
+
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return AddResult{}, fmt.Errorf("hash %s: %w", target, err)
 	}
 
 	cacheDir := filepath.Join(workdir, "cache")
 
 	err = os.MkdirAll(cacheDir, 0o755)
 	if err != nil {
-		return AddResult{}, false, fmt.Errorf("create %s: %w", cacheDir, err)
+		return AddResult{}, fmt.Errorf("create %s: %w", cacheDir, err)
 	}
 
 	tmp, err := os.CreateTemp(cacheDir, ".mirror-*.deb")
 	if err != nil {
-		return AddResult{}, false, fmt.Errorf("create temp file: %w", err)
+		return AddResult{}, fmt.Errorf("create temp file: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 
-	err = download(ctx, fmt.Sprintf("%s/%s", repo, e.filename), tmp, e)
+	err = download(ctx, repoPath(repo, e.filename).String(), tmp, e)
 	if err != nil {
-		return AddResult{}, false, err
+		return AddResult{}, err
 	}
 
-	res, err := Add(workdir, opts.TargetSuite, opts.TargetComponent, tmp.Name(), opts.Force)
+	return addPackage(workdir, opts.TargetSuite, opts.TargetComponent, tmp.Name(), placementOptions{
+		replace:  opts.Force,
+		expected: e.fields,
+	})
+}
+
+func checkExistingControl(target string, expected map[string]string) error {
+	f, err := os.Open(target)
 	if err != nil {
-		return AddResult{}, false, err
+		return err
+	}
+	defer f.Close()
+
+	control, err := debfile.Parse(f)
+	if err != nil {
+		return err
 	}
 
-	return res, differs, nil
+	return checkIndexControl(control.Fields, expected)
 }
 
 // download streams url into tmp, closes it, and checks size and SHA256.
@@ -505,16 +614,42 @@ func download(ctx context.Context, url string, tmp *os.File, e mirrorEntry) erro
 
 	h := sha256.New()
 
-	n, copyErr := io.Copy(io.MultiWriter(tmp, h), resp.Body)
+	copyErr := copySized(io.MultiWriter(tmp, h), resp.Body, e.size)
 
 	err = errors.Join(copyErr, tmp.Close())
 	if err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
 
-	if n != e.size || hex.EncodeToString(h.Sum(nil)) != e.sha256 {
-		return fmt.Errorf("download %s: size or SHA256 mismatch with index", url)
+	if hex.EncodeToString(h.Sum(nil)) != e.sha256 {
+		return fmt.Errorf("download %s: SHA256 mismatch with index", url)
 	}
 
 	return nil
+}
+
+// copySized limits the write to the declared size and reads one more byte to
+// distinguish an exact response from one with trailing data.
+func copySized(dst io.Writer, src io.Reader, size int64) error {
+	n, err := io.Copy(dst, io.LimitReader(src, size))
+	if err != nil {
+		return err
+	}
+
+	if n != size {
+		return fmt.Errorf("size mismatch: got %d bytes, expected %d", n, size)
+	}
+
+	var trailing [1]byte
+
+	_, err = io.ReadFull(src, trailing[:])
+	if err == nil {
+		return fmt.Errorf("size mismatch: response exceeds %d bytes", size)
+	}
+
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+
+	return err
 }

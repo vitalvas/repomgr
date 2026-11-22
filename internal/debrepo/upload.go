@@ -82,7 +82,7 @@ func moveUpload(ctx context.Context, workdir, uploadDir, file string, d fs.DirEn
 		return errors.New("not at upload/<suite>/<component>/<file>.deb")
 	}
 
-	p, err := placePackage(workdir, parts[0], parts[1], file, false)
+	p, err := placePackage(workdir, parts[0], parts[1], file, placementOptions{})
 	if err != nil {
 		return err
 	}

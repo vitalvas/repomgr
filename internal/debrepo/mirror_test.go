@@ -244,9 +244,6 @@ func TestMirror(t *testing.T) {
 			{"no supported arch", func() map[string][]byte {
 				return upstreamFiles(t, "riscv64", "main", amd64Only, okDebs)
 			}, "architecture"},
-			{"unlisted index", func() map[string][]byte {
-				return upstreamFiles(t, "amd64 arm64", "main", amd64Only, okDebs)
-			}, "binary-arm64/Packages"},
 			{"index hash mismatch", func() map[string][]byte {
 				files := upstreamFiles(t, "amd64", "main", amd64Only, okDebs)
 				files[upAmd64] = []byte(fmt.Sprintf("%s\n\n", okIndex))
@@ -349,7 +346,7 @@ func TestMirror(t *testing.T) {
 		res, err := Mirror(t.Context(), newWorkdir(t), mirrorOpts(repo))
 		require.ErrorIs(t, err, ErrMirrorFailed)
 		assert.Equal(t, MirrorResult{Failed: 1}, res)
-		assert.Contains(t, logs.String(), "mismatch with index")
+		assert.Contains(t, logs.String(), "size mismatch")
 	})
 
 	t.Run("trailing slash in source repo", func(t *testing.T) {
@@ -485,6 +482,116 @@ func TestMirrorForce(t *testing.T) {
 	})
 }
 
+func TestMirrorIndexValidation(t *testing.T) {
+	control := archCtl("foo", "amd64")
+	deb := debBytes(t, control)
+	const filename = "pool/foo+1#main.deb"
+
+	entry := packagesEntry(control, filename, deb)
+	build := func(t *testing.T, content string) map[string][]byte {
+		t.Helper()
+
+		return upstreamFiles(t, "all amd64 arm64", "main", map[string]string{
+			"main/binary-amd64/Packages": content,
+		}, map[string][]byte{filename: deb})
+	}
+
+	t.Run("sparse indexes with CRLF and a repository base path", func(t *testing.T) {
+		upper := strings.ReplaceAll(entry, hexSum(deb), strings.ToUpper(hexSum(deb)))
+		content := strings.ReplaceAll(fmt.Sprintf("%s\n\n%s\n", upper, entry), "\n", "\r\n")
+		files := map[string][]byte{}
+		for name, data := range build(t, content) {
+			files[fmt.Sprintf("repo path/%s", name)] = data
+		}
+
+		repo := serveFiles(t, files)
+		opts := mirrorOpts(repo)
+		opts.SourceRepo = fmt.Sprintf("%s/repo%%20path/", opts.SourceRepo)
+		opts.Name = `f|\Qfoo`
+
+		res, err := Mirror(t.Context(), newWorkdir(t), opts)
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Added: 1}, res)
+		assert.Equal(t, 1, repo.count(filename))
+	})
+
+	t.Run("base path is used exactly as given", func(t *testing.T) {
+		files := map[string][]byte{}
+		for name, data := range build(t, entry) {
+			files[fmt.Sprintf("mirrors//debian/%s", name)] = data
+		}
+
+		repo := serveFiles(t, files)
+		opts := mirrorOpts(repo)
+		opts.SourceRepo = fmt.Sprintf("%s/mirrors//debian/", opts.SourceRepo)
+
+		res, err := Mirror(t.Context(), newWorkdir(t), opts)
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Added: 1}, res)
+		assert.Equal(t, 1, repo.count(filename))
+	})
+
+	t.Run("conflicting duplicate entries", func(t *testing.T) {
+		wrongVersion := strings.Replace(entry, "Version: 1.0", "Version: 2.0", 1)
+		repo := serveFiles(t, build(t, strings.Join([]string{entry, wrongVersion}, "\n\n")))
+		_, err := Mirror(t.Context(), newWorkdir(t), mirrorOpts(repo))
+		require.ErrorContains(t, err, "conflicting index entries")
+		assert.Zero(t, repo.count(filename))
+	})
+
+	t.Run("downloaded control disagrees with selected version", func(t *testing.T) {
+		wrongVersion := strings.Replace(entry, "Version: 1.0", "Version: 2:1.0", 1)
+		repo := serveFiles(t, build(t, wrongVersion))
+		opts := mirrorOpts(repo)
+		opts.Version = "2:.*"
+
+		workdir := newWorkdir(t)
+		logs := captureLogs(t)
+		res, err := Mirror(t.Context(), workdir, opts)
+		require.ErrorIs(t, err, ErrMirrorFailed)
+		assert.Equal(t, MirrorResult{Failed: 1}, res)
+		assert.Contains(t, logs.String(), "version differs from index")
+		assert.NoFileExists(t, filepath.Join(workdir, "public", poolFoo))
+
+		addPkg(t, workdir, "mirror", "main", control)
+		res, err = Mirror(t.Context(), workdir, opts)
+		require.ErrorIs(t, err, ErrMirrorFailed)
+		assert.Equal(t, MirrorResult{Failed: 1}, res)
+		assert.Equal(t, 1, repo.count(filename))
+	})
+
+	t.Run("existing package must match the advertised size", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		addPkg(t, workdir, "mirror", "main", control)
+		wrongSize := strings.Replace(entry, fmt.Sprintf("Size: %d", len(deb)), fmt.Sprintf("Size: %d", len(deb)+1), 1)
+		repo := serveFiles(t, build(t, wrongSize))
+
+		res, err := Mirror(t.Context(), workdir, mirrorOpts(repo))
+		require.ErrorIs(t, err, ErrMirrorFailed)
+		assert.Equal(t, MirrorResult{Failed: 1}, res)
+		assert.Zero(t, repo.count(filename))
+	})
+
+	t.Run("filename must be relative to repository", func(t *testing.T) {
+		invalid := strings.Replace(entry, filename, "/pool/foo.deb", 1)
+		repo := serveFiles(t, build(t, invalid))
+
+		_, err := Mirror(t.Context(), newWorkdir(t), mirrorOpts(repo))
+		require.ErrorContains(t, err, "invalid Filename")
+		assert.Zero(t, repo.count(".deb"))
+	})
+}
+
+func TestCopySized(t *testing.T) {
+	var dst bytes.Buffer
+	src := strings.NewReader("extra trailing bytes")
+
+	err := copySized(&dst, src, 5)
+	require.ErrorContains(t, err, "size mismatch")
+	assert.Equal(t, "extra", dst.String())
+	assert.Equal(t, len("trailing bytes"), src.Len())
+}
+
 func TestMirrorIndexCompression(t *testing.T) {
 	fooDeb := debBytes(t, archCtl("foo", "amd64"))
 	index := []byte(packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb))
@@ -504,6 +611,7 @@ func TestMirrorIndexCompression(t *testing.T) {
 	const (
 		base    string = "main/binary-amd64/Packages"
 		baseGz  string = "main/binary-amd64/Packages.gz"
+		baseXz  string = "main/binary-amd64/Packages.xz"
 		baseZst string = "main/binary-amd64/Packages.zst"
 	)
 
@@ -532,6 +640,7 @@ func TestMirrorIndexCompression(t *testing.T) {
 		}{
 			{"zst wins", map[string][]byte{base: index, baseGz: gzData, baseZst: zstData}, ".zst", []string{".gz", "/Packages"}},
 			{"gz over plain", map[string][]byte{base: index, baseGz: gzData}, ".gz", []string{".zst", "/Packages"}},
+			{"xz is never used", map[string][]byte{base: index, baseXz: junk}, "/Packages", []string{".xz"}},
 			{"plain only", map[string][]byte{base: index}, "/Packages", []string{".zst", ".gz"}},
 		}
 
@@ -585,7 +694,7 @@ func TestMirrorIndexCompression(t *testing.T) {
 		}{
 			{"corrupt zst", map[string][]byte{baseZst: junk}, fmt.Sprintf("decompress %s", baseZst)},
 			{"corrupt gz", map[string][]byte{baseGz: junk}, fmt.Sprintf("decompress %s", baseGz)},
-			{"nothing listed", map[string][]byte{}, fmt.Sprintf("does not list %s", base)},
+			{"nothing listed", map[string][]byte{}, "does not list a supported Packages index"},
 		}
 
 		for _, tt := range tests {
