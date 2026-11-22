@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/vitalvas/repomgr/compare/v0.3.1...v0.3.2) (2026-11-22)
+
+
+### Bug Fixes
+
+* keep by-hash file mtimes when indexes are unchanged ([387846b](https://github.com/vitalvas/repomgr/commit/387846bae3abda700dbec821b98ea9bf18d155b3))
+
 ## [0.3.1](https://github.com/vitalvas/repomgr/compare/v0.3.0...v0.3.1) (2026-11-22)
 
 
