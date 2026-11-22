@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/vitalvas/repomgr/compare/v0.3.3...v0.4.0) (2026-11-22)
+
+
+### Features
+
+* optional repo.yaml, Release defaults, SHA-256 signatures ([08b75f5](https://github.com/vitalvas/repomgr/commit/08b75f50d82aff72f75086a528c6a83f9a8e0e68))
+
 ## [0.3.3](https://github.com/vitalvas/repomgr/compare/v0.3.2...v0.3.3) (2026-11-22)
 
 
