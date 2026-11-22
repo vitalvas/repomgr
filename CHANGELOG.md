@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/vitalvas/repomgr/compare/v0.3.0...v0.3.1) (2026-11-22)
+
+
+### Bug Fixes
+
+* keep signed Release files when a suite has no changes ([2cdb2f6](https://github.com/vitalvas/repomgr/commit/2cdb2f681ff8cabfc7882f2f03fc47f429d1b204))
+
 ## [0.3.0](https://github.com/vitalvas/repomgr/compare/v0.2.0...v0.3.0) (2026-11-22)
 
 
