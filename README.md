@@ -104,6 +104,66 @@ names start with a dot. Upload to a temporary name such as `.ikev2-hub.deb` or
 never reads a half-written package. Keep `upload/` on the same filesystem as
 `public/`, because the move is a rename.
 
+### Mirror an upstream repository
+
+`deb-mirror` copies packages from a remote APT repository into the pool of an
+initialized workdir:
+
+```shell
+repomgr deb-mirror --workdir /srv/repo \
+  --source-repo https://packages.broadcom.com/artifactory/saltproject-deb/ \
+  --source-suite stable --source-component main \
+  --target-suite mirrors --target-component salt-3006 \
+  --filter-name 'salt.*' --filter-version-exclude '.*~rc.*' --filter-version '3006.*'
+repomgr deb --workdir /srv/repo build
+```
+
+It reads `dists/<source-suite>/InRelease`, then the package index of every
+supported architecture the upstream lists. For each architecture it takes
+`Packages.zst`, `Packages.gz`, or plain `Packages`, in that order of
+preference. It checks each index against the SHA256 in `Release` and each
+downloaded `.deb` against the size and SHA256 in the index. Then it adds the
+package to `--target-suite` and `--target-component` the same way `add` does.
+It doesn't build indexes, so run `build` after your mirror runs.
+
+The mirror only adds. It never deletes local packages, even when upstream drops
+them. It copies every matching version, and skips packages that are already in
+the pool with the same SHA256 without downloading them again.
+
+These flags select packages. Each one is a Go regular expression that must
+match the whole value of the package control field. The pattern behaves as if
+it were wrapped in `^(?:...)$`. Name means the `Package` field, not the file
+name. An empty value means no filter, and an invalid pattern fails before any
+request:
+
+| Flag | Field | Default |
+| --- | --- | --- |
+| `--filter-name` | `Package` | `.*` |
+| `--filter-name-exclude` | `Package` | none |
+| `--filter-version` | `Version` | `.*` |
+| `--filter-version-exclude` | `Version` | none |
+| `--filter-architecture` | `Architecture` | none |
+| `--filter-architecture-exclude` | `Architecture` | none |
+
+A package is mirrored when every include filter matches and no exclude filter
+matches. Filters see the fields exactly as upstream writes them, so a version
+with an epoch such as `1:3006.0` doesn't match `3006.*`. Field names in the
+upstream `InRelease` and `Packages`, and in package control files, are matched
+case-insensitively, as in deb822.
+
+`--source-key <file>` takes the upstream public key, armored or binary. With
+it, `deb-mirror` verifies the `InRelease` signature and stops if it doesn't
+match. Without it, the signature isn't checked.
+
+If a local pool file has a different SHA256 than upstream, that package fails.
+`--force` replaces it with the verified upstream file instead, which repairs a
+corrupted local copy. `--force` only touches the target suite and component; a
+file with the same name and different content anywhere else in the pool still
+fails.
+
+A package that fails to download, verify, or add gets an error line, and the
+rest of the run continues. The command then exits with status 1.
+
 ## Workdir layout
 
 ```text
@@ -208,6 +268,11 @@ with a workdir-relative `path`:
   - `added by-hash`, `updated`, `removed by-hash`, and `removed stale` for
     what it changes under `dists/`;
   - one `built` line per suite.
+- `deb-mirror` logs:
+  - `added` or `replaced` with the pool `path` for each package it writes;
+  - `mirror failed` with the upstream `filename` and the reason;
+  - one `mirrored` line with the counts of added, replaced, unchanged, and
+    failed packages. Its `suite` and `component` are the target values.
 
 On error, the command logs the error once and exits with status 1.
 

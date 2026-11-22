@@ -76,10 +76,10 @@ func TestParse(t *testing.T) {
 
 		assert.Equal(t, "Package: hello\nVersion: 1.0-1\nArchitecture: amd64\nDescription: short line\n long line one\n .\n long line two", c.Raw)
 		assert.Equal(t, map[string]string{
-			"Package":      "hello",
-			"Version":      "1.0-1",
-			"Architecture": "amd64",
-			"Description":  "short line\n long line one\n .\n long line two",
+			"package":      "hello",
+			"version":      "1.0-1",
+			"architecture": "amd64",
+			"description":  "short line\n long line one\n .\n long line two",
 		}, c.Fields)
 	})
 
@@ -105,7 +105,7 @@ func TestParse(t *testing.T) {
 
 		c, err := Parse(bytes.NewReader(deb))
 		require.NoError(t, err)
-		assert.Equal(t, "x", c.Fields["Package"])
+		assert.Equal(t, "x", c.Fields["package"])
 	})
 
 	t.Run("skips members before control archive", func(t *testing.T) {
@@ -118,7 +118,7 @@ func TestParse(t *testing.T) {
 
 		c, err := Parse(&buf)
 		require.NoError(t, err)
-		assert.Equal(t, "x", c.Fields["Package"])
+		assert.Equal(t, "x", c.Fields["package"])
 	})
 
 	t.Run("trailing newlines only", func(t *testing.T) {
@@ -206,9 +206,14 @@ func TestSkip(t *testing.T) {
 func TestParseControl(t *testing.T) {
 	control, err := ParseControl("pAcKaGe:   one  \nVersion: 1\nB: two\n\tmore")
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"Package": "one", "Version": "1", "B": "two\n\tmore"}, control.Fields)
+	assert.Equal(t, map[string]string{"package": "one", "version": "1", "b": "two\n\tmore"}, control.Fields)
 
-	for _, raw := range []string{"A: one\n\nB: two", " orphan\nA: one", "A: one\nno colon", "Field Name: x", "A: one\na: two"} {
+	control, err = ParseControl("package: p\nVERSION: 2\narchitecture: all\nFilename: x")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"package": "p", "version": "2", "architecture": "all", "filename": "x"}, control.Fields)
+	assert.Equal(t, "package: p\nVERSION: 2\narchitecture: all\nFilename: x", control.Raw)
+
+	for _, raw := range []string{"A: one\n\nB: two", " orphan\nA: one", "A: one\nno colon", "Field Name: x", "A: one\na: two", "Package: x\npackage: y"} {
 		_, err := ParseControl(raw)
 		assert.ErrorIs(t, err, ErrInvalidField, "%q", raw)
 	}

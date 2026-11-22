@@ -38,7 +38,7 @@ func TestCache(t *testing.T) {
 		workdir := newWorkdir(t)
 		src := writeDeb(t, ctl("foo", "1.0", ""))
 
-		res, err := Add(t.Context(), workdir, "stable", "main", src)
+		res, err := Add(workdir, "stable", "main", src, false)
 		require.NoError(t, err)
 		require.True(t, res.Added)
 
@@ -63,7 +63,7 @@ func TestCache(t *testing.T) {
 		before, err := os.ReadFile(cachePath(workdir))
 		require.NoError(t, err)
 
-		res, err = Add(t.Context(), workdir, "stable", "main", src)
+		res, err = Add(workdir, "stable", "main", src, false)
 		require.NoError(t, err)
 		assert.False(t, res.Added)
 
@@ -109,6 +109,27 @@ func TestCache(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, string(pkgs), fmt.Sprintf("SHA256: %s\n", orig.SHA256))
 		assert.Equal(t, orig.SHA256, readCache(t, workdir)[res.Path].SHA256)
+	})
+
+	t.Run("old mixed-case entry is re-parsed", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		res := addPkg(t, workdir, "stable", "main", ctl("foo", "1.0", ""))
+
+		_, err := Build(t.Context(), workdir, buildTime)
+		require.NoError(t, err)
+
+		entries := readCache(t, workdir)
+		orig := entries[res.Path]
+		old := orig
+		old.Fields = map[string]string{"Package": "foo", "Version": "1.0", "Architecture": "amd64"}
+		entries[res.Path] = old
+		require.NoError(t, saveCache(workdir, entries))
+
+		logs := captureLogs(t)
+		_, err = Build(t.Context(), workdir, buildTime)
+		require.NoError(t, err)
+		assert.Contains(t, logs.String(), "msg=parsed ")
+		assert.Equal(t, orig, readCache(t, workdir)[res.Path])
 	})
 
 	t.Run("build drops entries for missing files", func(t *testing.T) {
@@ -165,7 +186,7 @@ func TestCache(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "index.json")
 
-		_, err = Add(t.Context(), workdir, "stable", "main", writeDeb(t, ctl("foo", "1.0", "")))
+		_, err = Add(workdir, "stable", "main", writeDeb(t, ctl("foo", "1.0", "")), false)
 		require.Error(t, err)
 		assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
 	})
@@ -173,7 +194,7 @@ func TestCache(t *testing.T) {
 
 func BenchmarkLoadCache(b *testing.B) {
 	workdir := b.TempDir()
-	entries := map[string]cacheEntry{"pool/a.deb": {Size: 1, Fields: map[string]string{"Package": "a"}}}
+	entries := map[string]cacheEntry{"pool/a.deb": {Size: 1, Fields: map[string]string{"package": "a"}}}
 
 	require.NoError(b, saveCache(workdir, entries))
 

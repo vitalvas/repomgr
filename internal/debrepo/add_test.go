@@ -1,6 +1,7 @@
 package debrepo
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -15,11 +16,36 @@ import (
 	"go.vitalvas.com/repomgr/internal/debtest"
 )
 
-func newWorkdir(t *testing.T) string {
+// templateWorkdir is an initialized workdir created once per test binary.
+// Key generation is slow under the race detector, so tests copy it.
+var templateWorkdir string
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "debrepo-template-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	err = Init(context.Background(), dir, "Repo Signer", "repo@example.com")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.RemoveAll(dir)
+		os.Exit(1)
+	}
+
+	templateWorkdir = dir
+	code := m.Run()
+
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+func newWorkdir(t testing.TB) string {
 	t.Helper()
 
 	workdir := t.TempDir()
-	require.NoError(t, Init(t.Context(), workdir, "Repo Signer", "repo@example.com"))
+	require.NoError(t, os.CopyFS(workdir, os.DirFS(templateWorkdir)))
 
 	return workdir
 }
@@ -40,12 +66,21 @@ func ctl(pkg, version, extra string) string {
 	return fmt.Sprintf("Package: %s\nVersion: %s\nArchitecture: amd64\n%s", pkg, version, extra)
 }
 
+func TestAddLowercaseFieldNames(t *testing.T) {
+	workdir := newWorkdir(t)
+	src := writeDeb(t, "package: foo\nVERSION: 1.0\narchitecture: amd64\n")
+
+	res, err := Add(workdir, "stable", "main", src, false)
+	require.NoError(t, err)
+	assert.Equal(t, "pool/stable/main/f/foo/amd64/foo_1.0_amd64.deb", res.Path)
+}
+
 func TestAdd(t *testing.T) {
 	t.Run("copies into pool", func(t *testing.T) {
 		workdir := newWorkdir(t)
 		src := writeDeb(t, ctl("ikev2-hub", "0.12.0", ""))
 
-		res, err := Add(t.Context(), workdir, "stable", "main", src)
+		res, err := Add(workdir, "stable", "main", src, false)
 		require.NoError(t, err)
 
 		want := "pool/stable/main/i/ikev2-hub/amd64/ikev2-hub_0.12.0_amd64.deb"
@@ -77,7 +112,7 @@ func TestAdd(t *testing.T) {
 
 	for _, tc := range paths {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := Add(t.Context(), newWorkdir(t), "s", "c", writeDeb(t, tc.control))
+			res, err := Add(newWorkdir(t), "s", "c", writeDeb(t, tc.control), false)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, res.Path)
 		})
@@ -87,14 +122,14 @@ func TestAdd(t *testing.T) {
 		workdir := newWorkdir(t)
 		src := writeDeb(t, ctl("foo", "1.0", ""))
 
-		first, err := Add(t.Context(), workdir, "stable", "main", src)
+		first, err := Add(workdir, "stable", "main", src, false)
 		require.NoError(t, err)
 
 		target := filepath.Join(workdir, "public", first.Path)
 		old := time.Now().Add(-time.Hour).Truncate(time.Second)
 		require.NoError(t, os.Chtimes(target, old, old))
 
-		second, err := Add(t.Context(), workdir, "stable", "main", src)
+		second, err := Add(workdir, "stable", "main", src, false)
 		require.NoError(t, err)
 		assert.Equal(t, AddResult{Path: first.Path, Added: false}, second)
 
@@ -103,15 +138,62 @@ func TestAdd(t *testing.T) {
 		assert.True(t, info.ModTime().Equal(old))
 	})
 
+	t.Run("replace swaps different bytes at the target", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		first := writeDeb(t, ctl("foo", "1.0", ""))
+		other := writeDeb(t, ctl("foo", "1.0", "Description: different\n"))
+
+		res, err := Add(workdir, "stable", "main", first, false)
+		require.NoError(t, err)
+
+		replaced, err := Add(workdir, "stable", "main", other, true)
+		require.NoError(t, err)
+		assert.True(t, replaced.Added)
+		assert.Equal(t, res.Path, replaced.Path)
+
+		target := filepath.Join(workdir, "public", res.Path)
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		want, err := os.ReadFile(other)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+
+		cache, err := loadCache(workdir)
+		require.NoError(t, err)
+		assert.Equal(t, hexSum(want), cache[res.Path].SHA256)
+		assertNoTemp(t, filepath.Dir(target), 1)
+	})
+
+	t.Run("replace still conflicts with the same name elsewhere", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		first := writeDeb(t, ctl("foo", "1.0", ""))
+		other := writeDeb(t, ctl("foo", "1.0", "Description: different\n"))
+
+		_, err := Add(workdir, "a", "main", first, false)
+		require.NoError(t, err)
+
+		res, err := Add(workdir, "b", "main", first, false)
+		require.NoError(t, err)
+
+		_, err = Add(workdir, "b", "main", other, true)
+		require.ErrorIs(t, err, ErrConflict)
+
+		got, err := os.ReadFile(filepath.Join(workdir, "public", res.Path))
+		require.NoError(t, err)
+		want, err := os.ReadFile(first)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
 	t.Run("different bytes conflict", func(t *testing.T) {
 		workdir := newWorkdir(t)
 		first := writeDeb(t, ctl("foo", "1.0", ""))
 		other := writeDeb(t, ctl("foo", "1.0", "Description: different\n"))
 
-		res, err := Add(t.Context(), workdir, "stable", "main", first)
+		res, err := Add(workdir, "stable", "main", first, false)
 		require.NoError(t, err)
 
-		_, err = Add(t.Context(), workdir, "stable", "main", other)
+		_, err = Add(workdir, "stable", "main", other, false)
 		require.ErrorIs(t, err, ErrConflict)
 
 		target := filepath.Join(workdir, "public", res.Path)
@@ -124,7 +206,7 @@ func TestAdd(t *testing.T) {
 	})
 
 	t.Run("not initialized", func(t *testing.T) {
-		_, err := Add(t.Context(), t.TempDir(), "stable", "main", writeDeb(t, ctl("foo", "1.0", "")))
+		_, err := Add(t.TempDir(), "stable", "main", writeDeb(t, ctl("foo", "1.0", "")), false)
 		assert.ErrorIs(t, err, ErrNotInitialized)
 	})
 
@@ -132,10 +214,10 @@ func TestAdd(t *testing.T) {
 		src := writeDeb(t, ctl("foo", "1.0", ""))
 
 		for _, bad := range []string{"Stable", "../x", "", "-a", "a/b"} {
-			_, err := Add(t.Context(), newWorkdir(t), bad, "main", src)
+			_, err := Add(newWorkdir(t), bad, "main", src, false)
 			assert.ErrorIs(t, err, ErrInvalidName, "suite %q", bad)
 
-			_, err = Add(t.Context(), newWorkdir(t), "stable", bad, src)
+			_, err = Add(newWorkdir(t), "stable", bad, src, false)
 			assert.ErrorIs(t, err, ErrInvalidName, "component %q", bad)
 		}
 	})
@@ -144,24 +226,24 @@ func TestAdd(t *testing.T) {
 		notDeb := filepath.Join(t.TempDir(), "x.deb")
 		require.NoError(t, os.WriteFile(notDeb, []byte("not a deb"), 0o600))
 
-		_, err := Add(t.Context(), newWorkdir(t), "Bad", "main", notDeb)
+		_, err := Add(newWorkdir(t), "Bad", "main", notDeb, false)
 		assert.ErrorIs(t, err, ErrInvalidName)
 	})
 
 	t.Run("invalid source", func(t *testing.T) {
 		for _, source := range []string{"../evil", "Upper", "a"} {
-			_, err := Add(t.Context(), newWorkdir(t), "s", "c", writeDeb(t, ctl("foo", "1.0", fmt.Sprintf("Source: %s\n", source))))
+			_, err := Add(newWorkdir(t), "s", "c", writeDeb(t, ctl("foo", "1.0", fmt.Sprintf("Source: %s\n", source))), false)
 			assert.ErrorIs(t, err, debfile.ErrInvalidField, source)
 		}
 	})
 
 	t.Run("invalid package", func(t *testing.T) {
-		_, err := Add(t.Context(), newWorkdir(t), "s", "c", writeDeb(t, ctl("Foo", "1.0", "")))
+		_, err := Add(newWorkdir(t), "s", "c", writeDeb(t, ctl("Foo", "1.0", "")), false)
 		assert.ErrorIs(t, err, debfile.ErrInvalidField)
 	})
 
 	t.Run("missing file", func(t *testing.T) {
-		_, err := Add(t.Context(), newWorkdir(t), "s", "c", filepath.Join(t.TempDir(), "none.deb"))
+		_, err := Add(newWorkdir(t), "s", "c", filepath.Join(t.TempDir(), "none.deb"), false)
 		assert.Error(t, err)
 	})
 
@@ -170,7 +252,7 @@ func TestAdd(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Join(workdir, "public"), 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(workdir, "public", "pool"), nil, 0o644))
 
-		_, err := Add(t.Context(), workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")))
+		_, err := Add(workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")), false)
 		assert.Error(t, err)
 	})
 
@@ -179,7 +261,7 @@ func TestAdd(t *testing.T) {
 		dir := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo", "amd64", "foo_1.0_amd64.deb")
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 
-		_, err := Add(t.Context(), workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")))
+		_, err := Add(workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")), false)
 		assert.Error(t, err)
 	})
 
@@ -194,7 +276,7 @@ func TestAdd(t *testing.T) {
 		require.NoError(t, os.Chmod(dir, 0o555))
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-		_, err := Add(t.Context(), workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")))
+		_, err := Add(workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")), false)
 		require.Error(t, err)
 		assertNoTemp(t, dir, 0)
 	})
@@ -202,7 +284,7 @@ func TestAdd(t *testing.T) {
 	t.Run("no temp after success", func(t *testing.T) {
 		workdir := newWorkdir(t)
 
-		res, err := Add(t.Context(), workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")))
+		res, err := Add(workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")), false)
 		require.NoError(t, err)
 		assertNoTemp(t, filepath.Dir(filepath.Join(workdir, "public", res.Path)), 1)
 	})
@@ -213,10 +295,10 @@ func TestAddCrossPool(t *testing.T) {
 		workdir := newWorkdir(t)
 		src := writeDeb(t, ctl("foo", "1.0", ""))
 
-		_, err := Add(t.Context(), workdir, "a", "main", src)
+		_, err := Add(workdir, "a", "main", src, false)
 		require.NoError(t, err)
 
-		res, err := Add(t.Context(), workdir, "b", "main", src)
+		res, err := Add(workdir, "b", "main", src, false)
 		require.NoError(t, err)
 		assert.True(t, res.Added)
 	})
@@ -236,10 +318,10 @@ func TestAddCrossPool(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			workdir := newWorkdir(t)
 
-			_, err := Add(t.Context(), workdir, "a", "main", writeDeb(t, ctl("foo", "1.0", "")))
+			_, err := Add(workdir, "a", "main", writeDeb(t, ctl("foo", "1.0", "")), false)
 			require.NoError(t, err)
 
-			_, err = Add(t.Context(), workdir, tc.suite, tc.comp, writeDeb(t, ctl("foo", tc.version, "Description: x\n")))
+			_, err = Add(workdir, tc.suite, tc.comp, writeDeb(t, ctl("foo", tc.version, "Description: x\n")), false)
 			require.ErrorIs(t, err, ErrConflict)
 			assert.NoDirExists(t, filepath.Join(workdir, "public", "pool", tc.suite, tc.comp, "f"))
 		})
@@ -250,7 +332,7 @@ func TestAddRejectsConflictAcrossSources(t *testing.T) {
 	workdir := newWorkdir(t)
 	addPkg(t, workdir, "stable", "main", ctl("foo", "1.0", "Source: first\n"))
 
-	_, err := Add(t.Context(), workdir, "testing", "main", writeDeb(t, ctl("foo", "1.0", "Source: second\n")))
+	_, err := Add(workdir, "testing", "main", writeDeb(t, ctl("foo", "1.0", "Source: second\n")), false)
 	require.ErrorIs(t, err, ErrConflict)
 	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool", "testing"))
 }
@@ -260,10 +342,10 @@ func TestAddGlobMetaWorkdir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(workdir, 0o755))
 	require.NoError(t, Init(t.Context(), workdir, "Repo Signer", "repo@example.com"))
 
-	_, err := Add(t.Context(), workdir, "a", "main", writeDeb(t, ctl("foo", "1.0", "")))
+	_, err := Add(workdir, "a", "main", writeDeb(t, ctl("foo", "1.0", "")), false)
 	require.NoError(t, err)
 
-	_, err = Add(t.Context(), workdir, "b", "main", writeDeb(t, ctl("foo", "1.0", "Description: x\n")))
+	_, err = Add(workdir, "b", "main", writeDeb(t, ctl("foo", "1.0", "Description: x\n")), false)
 	require.ErrorIs(t, err, ErrConflict)
 }
 
@@ -323,7 +405,7 @@ func BenchmarkAdd(b *testing.B) {
 	require.NoError(b, os.WriteFile(src, data, 0o600))
 
 	for b.Loop() {
-		_, err := Add(b.Context(), workdir, "s", "c", src)
+		_, err := Add(workdir, "s", "c", src, false)
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -351,7 +433,7 @@ func FuzzAdd(f *testing.F) {
 
 		workdir := newWorkdir(t)
 
-		res, err := Add(t.Context(), workdir, "s", "c", src)
+		res, err := Add(workdir, "s", "c", src, false)
 		if err != nil {
 			return
 		}

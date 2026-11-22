@@ -1,7 +1,6 @@
 package debrepo
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -32,19 +31,29 @@ type AddResult struct {
 	Added bool
 }
 
-func Add(_ context.Context, workdir, suite, component, debPath string) (AddResult, error) {
+// checkInitialized returns ErrNotInitialized when workdir has no signing key; op names the caller in the message.
+func checkInitialized(workdir, op string) error {
 	keyPath := filepath.Join(workdir, "config", "signing.asc")
 
 	_, err := os.Stat(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return AddResult{}, fmt.Errorf("add to %s: %w", workdir, ErrNotInitialized)
+		return fmt.Errorf("%s to %s: %w", op, workdir, ErrNotInitialized)
 	}
 
 	if err != nil {
-		return AddResult{}, fmt.Errorf("stat %s: %w", keyPath, err)
+		return fmt.Errorf("stat %s: %w", keyPath, err)
 	}
 
-	p, err := placePackage(workdir, suite, component, debPath)
+	return nil
+}
+
+func Add(workdir, suite, component, debPath string, replace bool) (AddResult, error) {
+	err := checkInitialized(workdir, "add")
+	if err != nil {
+		return AddResult{}, err
+	}
+
+	p, err := placePackage(workdir, suite, component, debPath, replace)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -84,7 +93,7 @@ type placement struct {
 
 // placePackage validates and parses debPath and finds its pool path. exists
 // reports that the pool already holds the same bytes there.
-func placePackage(workdir, suite, component, debPath string) (placement, error) {
+func placePackage(workdir, suite, component, debPath string, replace bool) (placement, error) {
 	err := checkNames(suite, component)
 	if err != nil {
 		return placement{}, err
@@ -100,21 +109,28 @@ func placePackage(workdir, suite, component, debPath string) (placement, error) 
 		return placement{}, err
 	}
 
+	p := placement{rel: rel, target: filepath.Join(workdir, "public", filepath.FromSlash(rel)), pkg: pkg}
+
+	// With replace, the target itself may hold different bytes; copies elsewhere still conflict.
+	skip := ""
+	if replace {
+		skip = p.target
+	}
+
 	poolDir := filepath.Join(workdir, "public", "pool")
-	err = checkPoolConflicts(poolDir, path.Base(rel), pkg.SHA256)
+
+	err = checkPoolConflicts(poolDir, path.Base(rel), pkg.SHA256, skip)
 	if err != nil {
 		return placement{}, fmt.Errorf("add %s: %w", debPath, err)
 	}
 
-	p := placement{rel: rel, target: filepath.Join(workdir, "public", filepath.FromSlash(rel)), pkg: pkg}
-
 	existing, err := fileSHA256(p.target)
 	if err == nil {
-		if existing != pkg.SHA256 {
+		if existing != pkg.SHA256 && !replace {
 			return placement{}, fmt.Errorf("add %s: %w", p.target, ErrConflict)
 		}
 
-		p.exists = true
+		p.exists = existing == pkg.SHA256
 
 		return p, nil
 	}
@@ -126,9 +142,11 @@ func placePackage(workdir, suite, component, debPath string) (placement, error) 
 	return p, nil
 }
 
-func checkPoolConflicts(poolDir, filename, wantSHA256 string) error {
+// checkPoolConflicts fails on a same-named file with other bytes; skip, when
+// not empty, is a path that is exempt from the check.
+func checkPoolConflicts(poolDir, filename, wantSHA256, skip string) error {
 	return walkPool(poolDir, func(file string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != filename {
+		if err != nil || entry.IsDir() || entry.Name() != filename || file == skip {
 			return err
 		}
 
@@ -178,8 +196,8 @@ func poolPath(suite, component string, fields map[string]string) (string, error)
 		return "", err
 	}
 
-	name := fields["Package"]
-	if source, ok := fields["Source"]; ok {
+	name := fields["package"]
+	if source, ok := fields["source"]; ok {
 		name, _, _ = strings.Cut(source, "(")
 		name = strings.TrimSpace(name)
 	}
@@ -193,15 +211,15 @@ func poolPath(suite, component string, fields map[string]string) (string, error)
 		prefix = name[:4]
 	}
 
-	version := fields["Version"]
+	version := fields["version"]
 
 	_, afterEpoch, hasEpoch := strings.Cut(version, ":")
 	if hasEpoch {
 		version = afterEpoch
 	}
 
-	arch := fields["Architecture"]
-	fileName := fmt.Sprintf("%s_%s_%s.deb", fields["Package"], version, arch)
+	arch := fields["architecture"]
+	fileName := fmt.Sprintf("%s_%s_%s.deb", fields["package"], version, arch)
 
 	return path.Join("pool", suite, component, prefix, name, arch, fileName), nil
 }

@@ -21,7 +21,7 @@ func uploadDeb(t *testing.T, workdir, rel string, data []byte) string {
 	return file
 }
 
-func debBytes(t *testing.T, control string) []byte {
+func debBytes(t testing.TB, control string) []byte {
 	t.Helper()
 
 	data, err := debtest.Build(control)
@@ -55,7 +55,7 @@ func TestBuildUploads(t *testing.T) {
 		data := debBytes(t, ctl("foo", "1.0", ""))
 		src := filepath.Join(t.TempDir(), "foo.deb")
 		require.NoError(t, os.WriteFile(src, data, 0o600))
-		_, err := Add(t.Context(), workdir, "stable", "main", src)
+		_, err := Add(workdir, "stable", "main", src, false)
 		require.NoError(t, err)
 
 		file := uploadDeb(t, workdir, "stable/main/foo.deb", data)

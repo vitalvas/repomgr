@@ -294,17 +294,7 @@ func ParseControl(raw string) (Control, error) {
 		}
 
 		seen[lower] = true
-		last = name
-		switch lower {
-		case "package":
-			last = "Package"
-		case "version":
-			last = "Version"
-		case "architecture":
-			last = "Architecture"
-		case "source":
-			last = "Source"
-		}
+		last = lower
 
 		value.WriteString(strings.Trim(data, " \t"))
 	}

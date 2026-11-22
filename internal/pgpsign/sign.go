@@ -65,21 +65,47 @@ func Verify(public, message []byte, signed Signed) error {
 		return fmt.Errorf("verify detached signature: %w", err)
 	}
 
-	block, _ := clearsign.Decode(signed.Clear)
-	if block == nil {
-		return errNoClearsign
-	}
-
-	_, err = block.VerifySignature(keyring, nil)
+	plaintext, err := VerifyClear(public, signed.Clear)
 	if err != nil {
-		return fmt.Errorf("verify clearsigned message: %w", err)
+		return err
 	}
 
-	if !bytes.Equal(block.Plaintext, message) {
+	if !bytes.Equal(plaintext, message) {
 		return errClearPlaintext
 	}
 
 	return nil
+}
+
+// VerifyClear checks the clearsigned message against public, which is either
+// an armored or a binary key, and returns the signed text.
+func VerifyClear(public, signed []byte) ([]byte, error) {
+	var (
+		keyring openpgp.EntityList
+		err     error
+	)
+
+	if bytes.Contains(public, []byte("-----BEGIN PGP PUBLIC KEY BLOCK-----")) {
+		keyring, err = openpgp.ReadArmoredKeyRing(bytes.NewReader(public))
+	} else {
+		keyring, err = openpgp.ReadKeyRing(bytes.NewReader(public))
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("read public key: %w", err)
+	}
+
+	block, _ := clearsign.Decode(signed)
+	if block == nil {
+		return nil, errNoClearsign
+	}
+
+	_, err = block.VerifySignature(keyring, nil)
+	if err != nil {
+		return nil, fmt.Errorf("verify clearsigned message: %w", err)
+	}
+
+	return block.Plaintext, nil
 }
 
 // Sign signs message with SHA-256 because gpgv and sqv reject SHA-1.

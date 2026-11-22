@@ -521,10 +521,10 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 
 		seenSums[base] = sumSeen{sha256: pkg.SHA256, filename: filename}
 
-		key := indexKey{suite: parts[0], component: parts[1], arch: pkg.Control.Fields["Architecture"]}
+		key := indexKey{suite: parts[0], component: parts[1], arch: pkg.Control.Fields["architecture"]}
 
 		indexes[key] = append(indexes[key], indexEntry{
-			name:     pkg.Control.Fields["Package"],
+			name:     pkg.Control.Fields["package"],
 			filename: filename,
 			stanza:   stanza(pkg.Control.Raw, filename, pkg),
 		})

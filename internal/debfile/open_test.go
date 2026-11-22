@@ -48,8 +48,8 @@ func TestOpen(t *testing.T) {
 		assert.Equal(t, hex.EncodeToString(md[:]), pkg.MD5)
 		assert.Equal(t, hex.EncodeToString(s1[:]), pkg.SHA1)
 		assert.Equal(t, hex.EncodeToString(s256[:]), pkg.SHA256)
-		assert.Equal(t, "hello", pkg.Control.Fields["Package"])
-		assert.Equal(t, "amd64", pkg.Control.Fields["Architecture"])
+		assert.Equal(t, "hello", pkg.Control.Fields["package"])
+		assert.Equal(t, "amd64", pkg.Control.Fields["architecture"])
 		assert.Equal(t, control[:len(control)-1], pkg.Control.Raw)
 	})
 
@@ -68,7 +68,7 @@ func TestOpen(t *testing.T) {
 
 				pkg, err := Open(path)
 				require.NoError(t, err)
-				assert.Equal(t, c[0], pkg.Control.Fields["Package"])
+				assert.Equal(t, c[0], pkg.Control.Fields["package"])
 			})
 		}
 	})

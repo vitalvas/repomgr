@@ -170,6 +170,94 @@ func TestVerify(t *testing.T) {
 	}
 }
 
+func TestVerifyClear(t *testing.T) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(t, err)
+
+	other, err := GenerateKey("Other", "other@example.com")
+	require.NoError(t, err)
+
+	armored, err := ArmorPublicKey(key.Public)
+	require.NoError(t, err)
+
+	message := []byte(sampleRelease)
+
+	signed, err := Sign(key.Private, message)
+	require.NoError(t, err)
+
+	t.Run("accepts", func(t *testing.T) {
+		for name, public := range map[string][]byte{"binary key": key.Public, "armored key": armored} {
+			t.Run(name, func(t *testing.T) {
+				got, err := VerifyClear(public, signed.Clear)
+				require.NoError(t, err)
+				assert.Equal(t, message, got)
+			})
+		}
+	})
+
+	t.Run("rejects", func(t *testing.T) {
+		edited := bytes.Replace(signed.Clear, []byte("stable"), []byte("stabl3"), 1)
+
+		cases := map[string]struct {
+			public []byte
+			clear  []byte
+			want   error
+		}{
+			"wrong key":        {other.Public, signed.Clear, nil},
+			"edited plaintext": {key.Public, edited, nil},
+			"not clearsigned":  {key.Public, message, errNoClearsign},
+			"garbage key":      {[]byte("not a key"), signed.Clear, nil},
+		}
+
+		for name, tc := range cases {
+			t.Run(name, func(t *testing.T) {
+				_, err := VerifyClear(tc.public, tc.clear)
+				require.Error(t, err)
+
+				if tc.want != nil {
+					assert.ErrorIs(t, err, tc.want)
+				}
+			})
+		}
+	})
+}
+
+func BenchmarkVerifyClear(b *testing.B) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(b, err)
+
+	signed, err := Sign(key.Private, []byte(sampleRelease))
+	require.NoError(b, err)
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		if _, err := VerifyClear(key.Public, signed.Clear); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func FuzzVerifyClear(f *testing.F) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(f, err)
+
+	signed, err := Sign(key.Private, []byte(sampleRelease))
+	require.NoError(f, err)
+
+	f.Add(signed.Clear)
+	f.Add([]byte(sampleRelease))
+	f.Add([]byte(""))
+	f.Add([]byte("-----BEGIN PGP SIGNED MESSAGE-----\n- dash\n"))
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		got, err := VerifyClear(key.Public, data)
+		if err != nil {
+			assert.Nil(t, got)
+		}
+	})
+}
+
 func BenchmarkSign(b *testing.B) {
 	key, err := GenerateKey("Repo Signer", "repo@example.com")
 	require.NoError(b, err)

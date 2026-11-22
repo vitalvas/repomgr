@@ -33,7 +33,7 @@ var buildTime = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
 func addPkg(t *testing.T, workdir, suite, component, control string) AddResult {
 	t.Helper()
 
-	res, err := Add(t.Context(), workdir, suite, component, writeDeb(t, control))
+	res, err := Add(workdir, suite, component, writeDeb(t, control), false)
 	require.NoError(t, err)
 
 	return res
@@ -996,7 +996,7 @@ func BenchmarkBuild(b *testing.B) {
 	data, err := debtest.Build(ctl("foo", "1.0", ""))
 	require.NoError(b, err)
 	require.NoError(b, os.WriteFile(src, data, 0o600))
-	_, err = Add(b.Context(), workdir, "s", "c", src)
+	_, err = Add(workdir, "s", "c", src, false)
 	require.NoError(b, err)
 
 	b.ReportAllocs()

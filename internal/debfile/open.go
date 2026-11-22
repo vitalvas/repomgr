@@ -21,7 +21,7 @@ var (
 	versionRe  = regexp.MustCompile(`^(?:[0-9]+:[0-9][A-Za-z0-9.+~:-]*|[0-9][A-Za-z0-9.+~-]*)$`)
 	revisionRe = regexp.MustCompile(`^[A-Za-z0-9+.~]+$`)
 
-	architectures = []string{"all", "amd64", "arm64", "armel", "armhf", "i386"}
+	Architectures = []string{"all", "amd64", "arm64", "armel", "armhf", "i386"}
 )
 
 type Package struct {
@@ -78,19 +78,19 @@ func Open(path string) (Package, error) {
 
 // Validate checks the control fields used to identify a binary package.
 func (c Control) Validate() error {
-	pkg := c.Fields["Package"]
+	pkg := c.Fields["package"]
 	if !packageRe.MatchString(pkg) {
 		return fmt.Errorf("%w: Package %q", ErrInvalidField, pkg)
 	}
 
-	version := c.Fields["Version"]
+	version := c.Fields["version"]
 	dash := strings.LastIndexByte(version, '-')
 	if !versionRe.MatchString(version) || (dash >= 0 && !revisionRe.MatchString(version[dash+1:])) {
 		return fmt.Errorf("%w: Version %q", ErrInvalidField, version)
 	}
 
-	arch := c.Fields["Architecture"]
-	if !slices.Contains(architectures, arch) {
+	arch := c.Fields["architecture"]
+	if !slices.Contains(Architectures, arch) {
 		return fmt.Errorf("%w: Architecture %q", ErrInvalidField, arch)
 	}
 
