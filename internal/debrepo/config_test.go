@@ -53,7 +53,7 @@ func TestBuildRepoConfig(t *testing.T) {
 
 		_, err := Build(t.Context(), workdir, buildTime)
 		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(readPublic(t, workdir, "dists", "s", "Release"), "Suite: s\nCodename: s\nDate: "))
+		assert.True(t, strings.HasPrefix(readPublic(t, workdir, "dists", "s", "Release"), "Origin: . s\nLabel: . s\nSuite: s\nCodename: s\nDate: "))
 	})
 
 	t.Run("unknown key fails", func(t *testing.T) {
@@ -113,7 +113,7 @@ func TestBuildRepoConfig(t *testing.T) {
 
 		_, err := Build(t.Context(), workdir, buildTime)
 		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(readPublic(t, workdir, "dists", "s", "Release"), "Suite: s\nVersion: 1.0\nCodename: s\n"))
+		assert.True(t, strings.HasPrefix(readPublic(t, workdir, "dists", "s", "Release"), "Origin: . s\nLabel: . s\nSuite: s\nVersion: 1.0\nCodename: s\n"))
 	})
 }
 

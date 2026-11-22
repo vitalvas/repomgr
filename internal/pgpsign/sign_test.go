@@ -57,7 +57,7 @@ func TestSign(t *testing.T) {
 		assert.Equal(t, bare, block.Plaintext)
 	})
 
-	t.Run("clearsign uses SHA-512", func(t *testing.T) {
+	t.Run("clearsign uses SHA-256", func(t *testing.T) {
 		block, _ := clearsign.Decode(signed.Clear)
 		require.NotNil(t, block)
 
@@ -66,7 +66,7 @@ func TestSign(t *testing.T) {
 
 		s, ok := sig.(*packet.Signature)
 		require.True(t, ok)
-		assert.Equal(t, crypto.SHA512, s.Hash)
+		assert.Equal(t, crypto.SHA256, s.Hash)
 	})
 
 	t.Run("detached verifies", func(t *testing.T) {
@@ -82,7 +82,7 @@ func TestSign(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	t.Run("detached uses SHA-512", func(t *testing.T) {
+	t.Run("detached uses SHA-256", func(t *testing.T) {
 		block, err := armor.Decode(bytes.NewReader(signed.Detached))
 		require.NoError(t, err)
 
@@ -91,7 +91,7 @@ func TestSign(t *testing.T) {
 
 		s, ok := sig.(*packet.Signature)
 		require.True(t, ok)
-		assert.Equal(t, crypto.SHA512, s.Hash)
+		assert.Equal(t, crypto.SHA256, s.Hash)
 	})
 
 	t.Run("invalid private key", func(t *testing.T) {

@@ -8,20 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"go.vitalvas.com/repomgr/internal/pgpsign"
 )
 
-const repoConfigContent string = `origin: ""
-label: ""
-description: ""
-`
-
 var ErrAlreadyInitialized = errors.New("workdir already initialized")
 
 func Init(ctx context.Context, workdir, name, email string) error {
-	configPath := filepath.Join(workdir, "config", "repo.yaml")
 	keyPath := filepath.Join(workdir, "config", "signing.asc")
 
 	_, err := os.Lstat(keyPath)
@@ -45,24 +38,6 @@ func Init(ctx context.Context, workdir, name, email string) error {
 		if err != nil {
 			return fmt.Errorf("create %s: %w", dir, err)
 		}
-	}
-
-	configInfo, err := os.Stat(configPath)
-
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		err = writeAtomic(configPath, strings.NewReader(repoConfigContent), 0o644, nil)
-		if err != nil {
-			return err
-		}
-
-		slog.InfoContext(ctx, "created", "path", logPath(workdir, configPath))
-	case err != nil:
-		return fmt.Errorf("stat %s: %w", configPath, err)
-	case !configInfo.Mode().IsRegular():
-		return fmt.Errorf("config %s is not a regular file", configPath)
-	default:
-		slog.InfoContext(ctx, "kept", "path", logPath(workdir, configPath))
 	}
 
 	publicFiles, err := publicKeyFiles(workdir, key.Public)

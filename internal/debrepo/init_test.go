@@ -11,8 +11,6 @@ import (
 	"go.vitalvas.com/repomgr/internal/pgpsign"
 )
 
-const wantConfig string = "origin: \"\"\nlabel: \"\"\ndescription: \"\"\n"
-
 func TestInit(t *testing.T) {
 	t.Run("creates layout and keys", func(t *testing.T) {
 		workdir := filepath.Join(t.TempDir(), "wd")
@@ -21,7 +19,7 @@ func TestInit(t *testing.T) {
 		require.NoError(t, Init(t.Context(), workdir, "Repo", "repo@example.com"))
 
 		out := logs.String()
-		assert.Contains(t, out, "msg=created path=config/repo.yaml\n")
+		assert.NotContains(t, out, "repo.yaml")
 		assert.Contains(t, out, "msg=created path=public/key.gpg\n")
 		assert.Contains(t, out, "msg=created path=public/key.asc\n")
 		assert.Contains(t, out, "msg=created path=config/signing.asc\n")
@@ -33,9 +31,7 @@ func TestInit(t *testing.T) {
 			assert.True(t, info.IsDir())
 		}
 
-		data, err := os.ReadFile(filepath.Join(workdir, "config", "repo.yaml"))
-		require.NoError(t, err)
-		assert.Equal(t, wantConfig, string(data))
+		assert.NoFileExists(t, filepath.Join(workdir, "config", "repo.yaml"))
 
 		keyPath := filepath.Join(workdir, "config", "signing.asc")
 		info, err := os.Stat(keyPath)
@@ -85,29 +81,11 @@ func TestInit(t *testing.T) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
 		require.NoError(t, os.WriteFile(configPath, []byte("origin: x\n"), 0o644))
 
-		logs := captureLogs(t)
-
 		require.NoError(t, Init(t.Context(), workdir, "Repo", "repo@example.com"))
-
-		out := logs.String()
-		assert.Contains(t, out, "msg=kept path=config/repo.yaml\n")
-		assert.NotContains(t, out, "msg=created path=config/repo.yaml")
 
 		data, err := os.ReadFile(configPath)
 		require.NoError(t, err)
 		assert.Equal(t, "origin: x\n", string(data))
-		assert.FileExists(t, filepath.Join(workdir, "config", "signing.asc"))
-	})
-
-	t.Run("config path is a directory", func(t *testing.T) {
-		workdir := t.TempDir()
-		configPath := filepath.Join(workdir, "config", "repo.yaml")
-		require.NoError(t, os.MkdirAll(configPath, 0o755))
-
-		err := Init(t.Context(), workdir, "Repo", "repo@example.com")
-		require.ErrorContains(t, err, "is not a regular file")
-		assert.NoFileExists(t, filepath.Join(workdir, "config", "signing.asc"))
-		assert.NoFileExists(t, filepath.Join(workdir, "public", "key.gpg"))
 	})
 
 	t.Run("key generation failure leaves workdir untouched", func(t *testing.T) {
@@ -194,7 +172,6 @@ func TestInit(t *testing.T) {
 		workdir := t.TempDir()
 		configDir := filepath.Join(workdir, "config")
 		require.NoError(t, os.MkdirAll(configDir, 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(configDir, "repo.yaml"), nil, 0o644))
 		require.NoError(t, os.Chmod(configDir, 0o555))
 		t.Cleanup(func() { _ = os.Chmod(configDir, 0o755) })
 

@@ -82,14 +82,14 @@ func Verify(public, message []byte, signed Signed) error {
 	return nil
 }
 
-// Sign signs message with SHA-512 because gpgv and sqv reject SHA-1.
+// Sign signs message with SHA-256 because gpgv and sqv reject SHA-1.
 func Sign(privateKey, message []byte) (Signed, error) {
 	entity, err := readPrivateKey(privateKey)
 	if err != nil {
 		return Signed{}, err
 	}
 
-	cfg := &packet.Config{DefaultHash: crypto.SHA512}
+	cfg := &packet.Config{DefaultHash: crypto.SHA256}
 
 	var clearBuf, detached bytes.Buffer
 

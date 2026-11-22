@@ -33,15 +33,15 @@ type AddResult struct {
 }
 
 func Add(_ context.Context, workdir, suite, component, debPath string) (AddResult, error) {
-	configPath := filepath.Join(workdir, "config", "repo.yaml")
+	keyPath := filepath.Join(workdir, "config", "signing.asc")
 
-	_, err := os.Stat(configPath)
+	_, err := os.Stat(keyPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return AddResult{}, fmt.Errorf("add to %s: %w", workdir, ErrNotInitialized)
 	}
 
 	if err != nil {
-		return AddResult{}, fmt.Errorf("stat %s: %w", configPath, err)
+		return AddResult{}, fmt.Errorf("stat %s: %w", keyPath, err)
 	}
 
 	p, err := placePackage(workdir, suite, component, debPath)

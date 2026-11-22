@@ -157,9 +157,7 @@ func TestDebInit(t *testing.T) {
 			assert.DirExists(t, filepath.Join(dir, name))
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, "config", "repo.yaml"))
-		require.NoError(t, err)
-		assert.Equal(t, "origin: \"\"\nlabel: \"\"\ndescription: \"\"\n", string(data))
+		assert.NoFileExists(t, filepath.Join(dir, "config", "repo.yaml"))
 
 		keyPath := filepath.Join(dir, "config", "signing.asc")
 		info, err := os.Stat(keyPath)
