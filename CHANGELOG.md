@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/vitalvas/repomgr/compare/v0.2.0...v0.3.0) (2026-11-22)
+
+
+### Features
+
+* move packages from the upload inbox into the pool on build ([5a06cb4](https://github.com/vitalvas/repomgr/commit/5a06cb4d44dd0b659d8415f9d54299dbdf027f60))
+
 ## [0.2.0](https://github.com/vitalvas/repomgr/compare/v0.1.0...v0.2.0) (2026-11-22)
 
 
