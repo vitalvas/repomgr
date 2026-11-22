@@ -54,7 +54,7 @@ compiles. `golang.org/x/crypto` v0.59.0 no longer ships `openpgp`.
   public/
     key.gpg                binary OpenPGP public key for a Signed-By keyring file
     key.asc                ASCII-armored public key for an embedded Signed-By
-    pool/<suite>/<component>/<prefix>/<name>/<Package>_<Version>_<Architecture>.deb
+    pool/<suite>/<component>/<prefix>/<name>/<Architecture>/<Package>_<Version>_<Architecture>.deb
     dists/<suite>/
       InRelease
       Release

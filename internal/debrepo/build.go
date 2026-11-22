@@ -472,7 +472,7 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 		}
 
 		parts := strings.Split(filepath.ToSlash(rel), "/")
-		if len(parts) != 5 {
+		if len(parts) != 6 {
 			return fmt.Errorf("build %s: %w", file, ErrMisplaced)
 		}
 

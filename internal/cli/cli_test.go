@@ -62,7 +62,7 @@ func TestDebAdd(t *testing.T) {
 		args := append(slices.Clone(base), "--suite", "stable", "--component", "main", file)
 
 		require.NoError(t, run(t, args...))
-		assert.FileExists(t, filepath.Join(dir, "public", "pool", "stable", "main", "f", "foo", "foo_1.0_amd64.deb"))
+		assert.FileExists(t, filepath.Join(dir, "public", "pool", "stable", "main", "f", "foo", "amd64", "foo_1.0_amd64.deb"))
 		require.NoError(t, run(t, args...))
 	})
 

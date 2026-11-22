@@ -48,7 +48,7 @@ func TestAdd(t *testing.T) {
 		res, err := Add(t.Context(), workdir, "stable", "main", src)
 		require.NoError(t, err)
 
-		want := "pool/stable/main/i/ikev2-hub/ikev2-hub_0.12.0_amd64.deb"
+		want := "pool/stable/main/i/ikev2-hub/amd64/ikev2-hub_0.12.0_amd64.deb"
 		assert.Equal(t, AddResult{Path: want, Added: true}, res)
 
 		target := filepath.Join(workdir, "public", want)
@@ -68,11 +68,11 @@ func TestAdd(t *testing.T) {
 		control string
 		want    string
 	}{
-		{"epoch stripped", ctl("foo", "1:2.0-1", ""), "pool/s/c/f/foo/foo_2.0-1_amd64.deb"},
-		{"source with version", ctl("zabbix-release", "1.0", "Source: zabbix (1.0)\n"), "pool/s/c/z/zabbix/zabbix-release_1.0_amd64.deb"},
-		{"source without version", ctl("zabbix-release", "1.0", "Source: zabbix \n"), "pool/s/c/z/zabbix/zabbix-release_1.0_amd64.deb"},
-		{"lib prefix", ctl("libfoo1", "1.0", ""), "pool/s/c/libf/libfoo1/libfoo1_1.0_amd64.deb"},
-		{"short lib name", ctl("lib", "1.0", ""), "pool/s/c/l/lib/lib_1.0_amd64.deb"},
+		{"epoch stripped", ctl("foo", "1:2.0-1", ""), "pool/s/c/f/foo/amd64/foo_2.0-1_amd64.deb"},
+		{"source with version", ctl("zabbix-release", "1.0", "Source: zabbix (1.0)\n"), "pool/s/c/z/zabbix/amd64/zabbix-release_1.0_amd64.deb"},
+		{"source without version", ctl("zabbix-release", "1.0", "Source: zabbix \n"), "pool/s/c/z/zabbix/amd64/zabbix-release_1.0_amd64.deb"},
+		{"lib prefix", ctl("libfoo1", "1.0", ""), "pool/s/c/libf/libfoo1/amd64/libfoo1_1.0_amd64.deb"},
+		{"short lib name", ctl("lib", "1.0", ""), "pool/s/c/l/lib/amd64/lib_1.0_amd64.deb"},
 	}
 
 	for _, tc := range paths {
@@ -176,7 +176,7 @@ func TestAdd(t *testing.T) {
 
 	t.Run("target is a directory", func(t *testing.T) {
 		workdir := newWorkdir(t)
-		dir := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo", "foo_1.0_amd64.deb")
+		dir := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo", "amd64", "foo_1.0_amd64.deb")
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 
 		_, err := Add(t.Context(), workdir, "s", "c", writeDeb(t, ctl("foo", "1.0", "")))
@@ -189,7 +189,7 @@ func TestAdd(t *testing.T) {
 		}
 
 		workdir := newWorkdir(t)
-		dir := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo")
+		dir := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo", "amd64")
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		require.NoError(t, os.Chmod(dir, 0o555))
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })

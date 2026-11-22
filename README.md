@@ -32,7 +32,7 @@ name. It validates `Package`, `Version`, and `Architecture`, then copies the
 file to its pool path:
 
 ```text
-pool/<suite>/<component>/<prefix>/<name>/<Package>_<Version>_<Architecture>.deb
+pool/<suite>/<component>/<prefix>/<name>/<Architecture>/<Package>_<Version>_<Architecture>.deb
 ```
 
 `<name>` is the `Source` field, or `Package` when there's no `Source`. The

@@ -200,9 +200,10 @@ func poolPath(suite, component string, fields map[string]string) (string, error)
 		version = afterEpoch
 	}
 
-	fileName := fmt.Sprintf("%s_%s_%s.deb", fields["Package"], version, fields["Architecture"])
+	arch := fields["Architecture"]
+	fileName := fmt.Sprintf("%s_%s_%s.deb", fields["Package"], version, arch)
 
-	return path.Join("pool", suite, component, prefix, name, fileName), nil
+	return path.Join("pool", suite, component, prefix, name, arch, fileName), nil
 }
 
 func fileSHA256(file string) (string, error) {

@@ -345,7 +345,7 @@ SHA256: %s
 
 	t.Run("invalid deb fails with path", func(t *testing.T) {
 		workdir := newWorkdir(t)
-		bad := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo", "foo_1.0_amd64.deb")
+		bad := filepath.Join(workdir, "public", "pool", "s", "c", "f", "foo", "amd64", "foo_1.0_amd64.deb")
 		require.NoError(t, os.MkdirAll(filepath.Dir(bad), 0o755))
 		require.NoError(t, os.WriteFile(bad, []byte("not a deb"), 0o644))
 
@@ -714,10 +714,12 @@ func TestBuildPoolChecks(t *testing.T) {
 		parts []string
 		want  string
 	}{
-		{"wrong file name", []string{"s", "c", "f", "foo", "other_1.0_amd64.deb"}, "pool/s/c/f/foo/other_1.0_amd64.deb: package not at its pool path, want pool/s/c/f/foo/foo_1.0_amd64.deb"},
-		{"wrong name dir", []string{"s", "c", "f", "bar", "foo_1.0_amd64.deb"}, ""},
+		{"wrong file name", []string{"s", "c", "f", "foo", "amd64", "other_1.0_amd64.deb"}, "pool/s/c/f/foo/amd64/other_1.0_amd64.deb: package not at its pool path, want pool/s/c/f/foo/amd64/foo_1.0_amd64.deb"},
+		{"wrong name dir", []string{"s", "c", "f", "bar", "amd64", "foo_1.0_amd64.deb"}, ""},
+		{"wrong arch dir", []string{"s", "c", "f", "foo", "arm64", "foo_1.0_amd64.deb"}, "want pool/s/c/f/foo/amd64/foo_1.0_amd64.deb"},
+		{"layout without arch dir", []string{"s", "c", "f", "foo", "foo_1.0_amd64.deb"}, ""},
 		{"depth 3", []string{"s", "c", "x.deb"}, ""},
-		{"bad suite", []string{"Bad", "c", "f", "foo", "foo_1.0_amd64.deb"}, ""},
+		{"bad suite", []string{"Bad", "c", "f", "foo", "amd64", "foo_1.0_amd64.deb"}, ""},
 	}
 
 	for _, tc := range misplaced {
@@ -738,7 +740,7 @@ func TestBuildPoolChecks(t *testing.T) {
 
 	t.Run("corrupt deb under bad suite is misplaced", func(t *testing.T) {
 		workdir := newWorkdir(t)
-		bad := filepath.Join(workdir, "public", "pool", "Bad", "c", "f", "foo", "foo_1.0_amd64.deb")
+		bad := filepath.Join(workdir, "public", "pool", "Bad", "c", "f", "foo", "amd64", "foo_1.0_amd64.deb")
 		require.NoError(t, os.MkdirAll(filepath.Dir(bad), 0o755))
 		require.NoError(t, os.WriteFile(bad, []byte("not a deb"), 0o644))
 
@@ -747,7 +749,7 @@ func TestBuildPoolChecks(t *testing.T) {
 		require.ErrorIs(t, err, ErrInvalidName)
 	})
 
-	const rel = "f/foo/foo_1.0_amd64.deb"
+	const rel = "f/foo/amd64/foo_1.0_amd64.deb"
 
 	t.Run("same name different bytes", func(t *testing.T) {
 		workdir := newWorkdir(t)
@@ -761,8 +763,8 @@ func TestBuildPoolChecks(t *testing.T) {
 
 	t.Run("same file name through epoch only", func(t *testing.T) {
 		workdir := newWorkdir(t)
-		poolFile(t, workdir, ctl("foo", "1:2.0", ""), "a", "main", "f/foo/foo_2.0_amd64.deb")
-		poolFile(t, workdir, ctl("foo", "2.0", ""), "b", "main", "f/foo/foo_2.0_amd64.deb")
+		poolFile(t, workdir, ctl("foo", "1:2.0", ""), "a", "main", "f/foo/amd64/foo_2.0_amd64.deb")
+		poolFile(t, workdir, ctl("foo", "2.0", ""), "b", "main", "f/foo/amd64/foo_2.0_amd64.deb")
 
 		_, err := Build(t.Context(), workdir, buildTime)
 		require.ErrorIs(t, err, ErrConflict)
@@ -870,8 +872,8 @@ func TestBuildLogs(t *testing.T) {
 		require.NoError(t, err)
 
 		out := logs.String()
-		assert.Contains(t, out, "msg=parsed path=public/pool/s/c/b/bar/bar_1.0_amd64.deb\n")
-		assert.Contains(t, out, "msg=parsed path=public/pool/s/c/f/foo/foo_1.0_amd64.deb\n")
+		assert.Contains(t, out, "msg=parsed path=public/pool/s/c/b/bar/amd64/bar_1.0_amd64.deb\n")
+		assert.Contains(t, out, "msg=parsed path=public/pool/s/c/f/foo/amd64/foo_1.0_amd64.deb\n")
 		assert.Less(t, strings.Index(out, "bar_1.0"), strings.Index(out, "foo_1.0"))
 	})
 

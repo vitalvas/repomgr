@@ -40,13 +40,13 @@ func TestBuildUploads(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.NoFileExists(t, file)
-		target := filepath.Join(workdir, "public", "pool", "stable", "main", "f", "foo", "foo_1.0_amd64.deb")
+		target := filepath.Join(workdir, "public", "pool", "stable", "main", "f", "foo", "amd64", "foo_1.0_amd64.deb")
 		info, err := os.Stat(target)
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 
 		assert.Contains(t, readPublic(t, workdir, "dists", "stable", "main", "binary-amd64", "Packages"), "Package: foo\n")
-		assert.Contains(t, logs.String(), "msg=moved path=upload/stable/main/anything.deb target=public/pool/stable/main/f/foo/foo_1.0_amd64.deb")
+		assert.Contains(t, logs.String(), "msg=moved path=upload/stable/main/anything.deb target=public/pool/stable/main/f/foo/amd64/foo_1.0_amd64.deb")
 		assert.DirExists(t, filepath.Join(workdir, "upload", "stable", "main"))
 	})
 
