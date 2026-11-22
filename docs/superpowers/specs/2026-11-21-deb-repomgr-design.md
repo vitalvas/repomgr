@@ -265,9 +265,11 @@ The repository format requires the current version and asks for at least two
 previous versions of each index. `build` keeps exactly two previous versions
 with no stored state:
 
-1. Set the mtime of every by-hash file that the new `Release` references to the
-   build time. A file's mtime then means the last build in which it was
-   current.
+1. A by-hash file's mtime is the build in which it last became current. A new
+   file gets it when written. When an index reverts to earlier content, its
+   existing file is older than an unreferenced one, so `build` sets its mtime
+   to the build time. `build` leaves the mtime of every other current file
+   alone, so tools that sync by mtime, such as `aws s3 sync`, skip them.
 2. In each `by-hash/<HashName>/` directory, sort the unreferenced files by
    mtime, newest first, keep the first six, and delete the rest.
 

@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -479,26 +480,68 @@ func TestBuildRetention(t *testing.T) {
 	t.Run("keeps two previous versions", func(t *testing.T) { run(t, false) })
 	t.Run("without cache", func(t *testing.T) { run(t, true) })
 
-	t.Run("unchanged rebuild refreshes mtime", func(t *testing.T) {
+	t.Run("unchanged rebuild keeps mtime", func(t *testing.T) {
 		workdir := newWorkdir(t)
 		addPkg(t, workdir, "s", "c", ctl("foo", "1.0", ""))
 
 		_, err := Build(t.Context(), workdir, buildTime)
 		require.NoError(t, err)
 
-		later := buildTime.Add(time.Hour)
-
-		_, err = Build(t.Context(), workdir, later)
-		require.NoError(t, err)
-
-		entries, err := os.ReadDir(hashDir(workdir))
-		require.NoError(t, err)
-		require.Len(t, entries, 3)
-
-		for _, e := range entries {
-			info, err := e.Info()
+		mtimes := func() map[string]time.Time {
+			entries, err := os.ReadDir(hashDir(workdir))
 			require.NoError(t, err)
-			assert.True(t, info.ModTime().Equal(later), e.Name())
+			require.Len(t, entries, 3)
+
+			out := make(map[string]time.Time, len(entries))
+
+			for _, e := range entries {
+				info, err := e.Info()
+				require.NoError(t, err)
+
+				out[e.Name()] = info.ModTime()
+			}
+
+			return out
+		}
+
+		before := mtimes()
+
+		_, err = Build(t.Context(), workdir, buildTime.Add(time.Hour))
+		require.NoError(t, err)
+		assert.Equal(t, before, mtimes())
+	})
+
+	t.Run("reverted index counts as the latest previous version", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		start := time.Now()
+
+		build := func(hour int) []string {
+			_, err := Build(t.Context(), workdir, start.Add(time.Duration(hour)*time.Hour))
+			require.NoError(t, err)
+
+			return current(t, workdir)
+		}
+
+		addPkg(t, workdir, "s", "c", ctl("pkg0", "1.0", ""))
+		v0 := build(0)
+
+		pkg1 := addPkg(t, workdir, "s", "c", ctl("pkg1", "1.0", ""))
+		v1 := build(1)
+
+		pkg2 := addPkg(t, workdir, "s", "c", ctl("pkg2", "1.0", ""))
+		v2 := build(2)
+
+		require.NoError(t, os.Remove(filepath.Join(workdir, "public", filepath.FromSlash(pkg1.Path))))
+		require.NoError(t, os.Remove(filepath.Join(workdir, "public", filepath.FromSlash(pkg2.Path))))
+		assert.Equal(t, v0, build(3))
+
+		addPkg(t, workdir, "s", "c", ctl("pkg3", "1.0", ""))
+		v3 := build(4)
+
+		assert.ElementsMatch(t, slices.Concat(v2, v0, v3), names(t, hashDir(workdir)))
+
+		for _, name := range v1 {
+			assert.NoFileExists(t, filepath.Join(hashDir(workdir), name))
 		}
 	})
 

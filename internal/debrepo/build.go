@@ -313,18 +313,17 @@ func publishFiles(ctx context.Context, workdir string, files []outputFile, creat
 
 // pruneByHash keeps the current by-hash files plus the two previous versions
 // of each index (indexVariants files per version) in every by-hash directory.
+// Retention ranks files by mtime, so a current file older than an unreferenced
+// one (an index reverted to earlier content) is touched to rank first again.
+// Current files are not touched otherwise, so mtime-based syncs skip them.
 func pruneByHash(ctx context.Context, workdir string, current []outputFile, now time.Time) error {
 	referenced := make(map[string]bool, len(current))
-	dirs := make(map[string]bool)
+	dirs := make(map[string][]string)
 
 	for _, f := range current {
-		err := os.Chtimes(f.path, now, now)
-		if err != nil {
-			return fmt.Errorf("touch %s: %w", f.path, err)
-		}
-
 		referenced[f.path] = true
-		dirs[filepath.Dir(f.path)] = true
+		dir := filepath.Dir(f.path)
+		dirs[dir] = append(dirs[dir], f.path)
 	}
 
 	type unreferenced struct {
@@ -357,6 +356,20 @@ func pruneByHash(ctx context.Context, workdir string, current []outputFile, now 
 		slices.SortFunc(files, func(a, b unreferenced) int {
 			return cmp.Or(b.mtime.Compare(a.mtime), strings.Compare(a.path, b.path))
 		})
+
+		for _, file := range dirs[dir] {
+			info, err := os.Stat(file)
+			if err != nil {
+				return fmt.Errorf("stat %s: %w", file, err)
+			}
+
+			if len(files) > 0 && files[0].mtime.After(info.ModTime()) {
+				err = os.Chtimes(file, now, now)
+				if err != nil {
+					return fmt.Errorf("touch %s: %w", file, err)
+				}
+			}
+		}
 
 		for _, u := range files[min(len(files), 2*indexVariants):] {
 			err = os.Remove(u.path)
