@@ -110,6 +110,11 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		return nil, err
 	}
 
+	rejected, err := processUploads(ctx, workdir)
+	if err != nil {
+		return nil, err
+	}
+
 	public := filepath.Join(workdir, "public")
 
 	cache, err := loadCache(workdir)
@@ -265,7 +270,14 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		return nil, err
 	}
 
-	return summaries, nil
+	switch rejected {
+	case 0:
+		return summaries, nil
+	case 1:
+		return summaries, fmt.Errorf("1 upload rejected: %w", ErrUploadRejected)
+	default:
+		return summaries, fmt.Errorf("%d uploads rejected: %w", rejected, ErrUploadRejected)
+	}
 }
 
 func publishFiles(ctx context.Context, workdir string, files []outputFile, createdMessage string) error {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.vitalvas.com/repomgr/internal/debrepo"
 	"go.vitalvas.com/repomgr/internal/debtest"
 )
 
@@ -94,6 +96,30 @@ func TestDebBuild(t *testing.T) {
 
 		assert.FileExists(t, filepath.Join(dir, "public", "dists", "stable", "main", "binary-amd64", "Packages"))
 		assert.FileExists(t, filepath.Join(dir, "public", "dists", "stable", "Release"))
+	})
+
+	t.Run("rejected upload logs built and fails", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, run(t, "deb", "--workdir", dir, "init", "--name", "Repo"))
+
+		data, err := debtest.Build("Package: foo\nVersion: 1.0\nArchitecture: amd64\n")
+		require.NoError(t, err)
+
+		for name, content := range map[string][]byte{"foo.deb": data, "broken.deb": []byte("not a deb")} {
+			file := filepath.Join(dir, "upload", "stable", "main", name)
+			require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+			require.NoError(t, os.WriteFile(file, content, 0o600))
+		}
+
+		var logs bytes.Buffer
+
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
+		err = run(t, "deb", "--workdir", dir, "build")
+		require.ErrorIs(t, err, debrepo.ErrUploadRejected)
+		assert.Contains(t, logs.String(), "msg=built suite=stable packages=1")
 	})
 
 	t.Run("uninitialized fails", func(t *testing.T) {

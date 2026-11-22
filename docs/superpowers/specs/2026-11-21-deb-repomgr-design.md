@@ -49,6 +49,8 @@ compiles. `golang.org/x/crypto` v0.59.0 no longer ships `openpgp`.
     signing.asc            armored private key, mode 0600, no passphrase
   cache/
     index.json             pool path -> size, mtime, control fields, checksums
+  upload/<suite>/<component>/*.deb
+                           inbox that build moves into the pool; same filesystem as public/
   public/
     key.gpg                binary OpenPGP public key for a Signed-By keyring file
     key.asc                ASCII-armored public key for an embedded Signed-By
@@ -133,26 +135,54 @@ that name are a conflict.
 
 ### build
 
-1. Load `config/repo.yaml`, `config/signing.asc`, and `cache/index.json`, and
-   derive the public key from `signing.asc`.
-2. Walk `pool/`. Reuse a valid cache entry when size and mtime match. Otherwise,
-   parse and hash the file again. Drop entries for missing files and save the cache.
-3. Fail if a package isn't at the path its control fields produce, or if the
+1. Load `config/repo.yaml` and `config/signing.asc`, and derive the public key
+   from `signing.asc`.
+2. Process `upload/` as described in [Upload inbox](#upload-inbox).
+3. Load `cache/index.json` and walk `pool/`. Reuse a valid cache entry when size
+   and mtime match. Otherwise, parse and hash the file again. Drop entries for
+   missing files and save the cache.
+4. Fail if a package isn't at the path its control fields produce, or if the
    same pool file name appears with different SHA256 anywhere in the pool.
-4. Group packages by suite, component, and architecture. `Architecture: all`
+5. Group packages by suite, component, and architecture. `Architecture: all`
    packages go only to `binary-all`.
-5. Generate every `Packages` index with its `.gz` and `.zst` forms, every
+6. Generate every `Packages` index with its `.gz` and `.zst` forms, every
    per-directory `Release`, the top-level `Release`, `InRelease`, and
    `Release.gpg` in memory. A failure up to this step leaves `dists/` as it
    was.
-6. Write `public/key.gpg` and `public/key.asc` when either is missing or
-   differs from the derived public key. Write missing by-hash files and atomically repair any current by-hash files
-   whose content differs from the rendered index.
-7. Replace the canonical `Packages`, `Packages.gz`, `Packages.zst`, and
+7. Write `public/key.gpg` and `public/key.asc` when either is missing or
+   differs from the derived public key. Write missing by-hash files and
+   atomically repair any current by-hash files whose content differs from the
+   rendered index.
+8. Replace the canonical `Packages`, `Packages.gz`, `Packages.zst`, and
    per-directory `Release` files with a temporary file and rename.
-8. Replace `Release` and `Release.gpg`, then `InRelease` last.
-9. Apply by-hash retention and remove the directories of suites, components,
-   and architectures that no longer have packages.
+9. Replace `Release` and `Release.gpg`, then `InRelease` last.
+10. Apply by-hash retention and remove the directories of suites, components,
+    and architectures that no longer have packages.
+11. If any upload was rejected, return an error naming the count, so the
+    command exits with status 1 after everything else is published.
+
+### Upload inbox
+
+`build` walks `upload/` in lexical order. A missing `upload/` counts as empty;
+an `upload` path that isn't a directory fails the build.
+
+- It skips files and directories whose names start with `.`, and files whose
+  names don't end in `.deb`. Uploaders write under such a name and rename to
+  `*.deb` when the file is complete.
+- A `.deb` must sit at `upload/<suite>/<component>/<file>.deb` and be a regular
+  file.
+- Each `.deb` goes through the same checks as `add` steps 2 to 5: suite and
+  component names, package parsing and validation, pool path, and the
+  pool-wide conflict check.
+- With no conflict, `build` sets the file to mode 0644 and renames it into its
+  pool path. `upload/` and `public/` must share a filesystem for the rename.
+  `build` writes no cache entry for it; step 3 parses the moved file, so the
+  indexes describe the bytes that actually landed in the pool.
+- If the pool path already holds the same bytes, `build` deletes the upload.
+- Any failure leaves the file in `upload/` and counts it as rejected. When two
+  uploads map to the same pool file name with different bytes, the first in
+  lexical order moves and the second is rejected as a conflict.
+- Emptied directories under `upload/` stay.
 
 ## Index format
 
@@ -286,6 +316,9 @@ rename. `add` writes the entry for the file it adds.
   `repo.yaml`.
 - `build` logs every change it makes, at info level, each with a
   workdir-relative `path`:
+  - `moved` and `removed duplicate` for uploads, with the upload `path` and the
+    pool `target`. A rejected upload gets an error-level `upload rejected` line
+    with the reason.
   - `parsed` for a package read because the cache had no matching entry.
   - `cache dropped` for a cache entry whose pool file is gone.
   - `created` or `updated` for `public/key.gpg` and `public/key.asc` when

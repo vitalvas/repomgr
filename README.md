@@ -71,6 +71,34 @@ files share a name but differ in content.
 `build` caches parsed packages in `cache/index.json` and only re-reads files
 whose size or modification time changed. You can delete `cache/` at any time.
 
+### Upload inbox
+
+Instead of running `add` for each package, you can drop packages into
+`upload/<suite>/<component>/` and run `build`:
+
+```shell
+cp ikev2-hub.deb /srv/repo/upload/noble/main/
+repomgr deb --workdir /srv/repo build
+```
+
+Before it scans the pool, `build` checks every `*.deb` directly inside an
+`upload/<suite>/<component>/` directory the same way `add` does. Then:
+
+- A package with no conflict is moved into its pool path and lands in the
+  indexes of the same build.
+- A package whose exact bytes are already in the pool is deleted from
+  `upload/`.
+- A package that fails a check stays in `upload/` and gets an error line. This
+  covers a conflict with the pool, an invalid package, a bad suite or component
+  name, or a `.deb` at any other depth. `build` still publishes everything else,
+  then exits with status 1.
+
+`build` ignores files that don't end in `.deb`, and files and directories whose
+names start with a dot. Upload to a temporary name such as `.ikev2-hub.deb` or
+`ikev2-hub.deb.part`, then rename it once the copy is complete, so `build`
+never reads a half-written package. Keep `upload/` on the same filesystem as
+`public/`, because the move is a rename.
+
 ## Workdir layout
 
 ```text
@@ -80,6 +108,9 @@ whose size or modification time changed. You can delete `cache/` at any time.
     signing.asc     private signing key, mode 0600
   cache/
     index.json      parsed package cache
+  upload/
+    <suite>/<component>/
+                    packages waiting for the next build
   public/
     key.gpg         binary public key for a Signed-By keyring file
     key.asc         ASCII-armored public key for an inline Signed-By
@@ -87,7 +118,7 @@ whose size or modification time changed. You can delete `cache/` at any time.
     dists/          indexes and signatures
 ```
 
-Publish `public/` and keep `config/` private. The `Origin`, `Label`,
+Publish `public/` and keep `config/` and `upload/` private. The `Origin`, `Label`,
 `Description`, and per-suite `Suite` and `Version` fields come from
 `config/repo.yaml`; see the
 [repository metadata section of the design](docs/superpowers/specs/2026-11-21-deb-repomgr-design.md#repository-metadata-file).
@@ -161,6 +192,8 @@ with a workdir-relative `path`:
   `repo.yaml`.
 - `add` logs `added` or `unchanged`.
 - `build` logs:
+  - `moved` or `removed duplicate` for each upload, with the upload `path` and
+    the pool `target`, or an error line `upload rejected` with the reason;
   - `parsed` for each package it reads;
   - `cache dropped` for each package that left the pool;
   - `created` or `updated` for `public/key.gpg` and `public/key.asc` when it

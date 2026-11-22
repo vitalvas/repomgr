@@ -44,40 +44,13 @@ func Add(_ context.Context, workdir, suite, component, debPath string) (AddResul
 		return AddResult{}, fmt.Errorf("stat %s: %w", configPath, err)
 	}
 
-	err = checkNames(suite, component)
+	p, err := placePackage(workdir, suite, component, debPath)
 	if err != nil {
 		return AddResult{}, err
 	}
 
-	pkg, err := debfile.Open(debPath)
-	if err != nil {
-		return AddResult{}, fmt.Errorf("add %s: %w", debPath, err)
-	}
-
-	rel, err := poolPath(suite, component, pkg.Control.Fields)
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	poolDir := filepath.Join(workdir, "public", "pool")
-	err = checkPoolConflicts(poolDir, path.Base(rel), pkg.SHA256)
-	if err != nil {
-		return AddResult{}, fmt.Errorf("add %s: %w", debPath, err)
-	}
-
-	target := filepath.Join(workdir, "public", filepath.FromSlash(rel))
-
-	existing, err := fileSHA256(target)
-	if err == nil {
-		if existing != pkg.SHA256 {
-			return AddResult{}, fmt.Errorf("add %s: %w", target, ErrConflict)
-		}
-
-		return AddResult{Path: rel, Added: false}, nil
-	}
-
-	if !errors.Is(err, os.ErrNotExist) {
-		return AddResult{}, fmt.Errorf("hash %s: %w", target, err)
+	if p.exists {
+		return AddResult{Path: p.rel, Added: false}, nil
 	}
 
 	cache, err := loadCache(workdir)
@@ -85,21 +58,72 @@ func Add(_ context.Context, workdir, suite, component, debPath string) (AddResul
 		return AddResult{}, err
 	}
 
-	err = copyVerified(debPath, target, pkg.SHA256)
+	err = copyVerified(debPath, p.target, p.pkg.SHA256)
 	if err != nil {
 		return AddResult{}, err
 	}
 
-	err = cacheAddedPackage(workdir, target, rel, pkg, cache)
+	err = cacheAddedPackage(workdir, p.target, p.rel, p.pkg, cache)
 	if err != nil {
-		if rollbackErr := os.Remove(target); rollbackErr != nil {
-			err = errors.Join(err, fmt.Errorf("remove %s after cache failure: %w", target, rollbackErr))
+		if rollbackErr := os.Remove(p.target); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove %s after cache failure: %w", p.target, rollbackErr))
 		}
 
 		return AddResult{}, err
 	}
 
-	return AddResult{Path: rel, Added: true}, nil
+	return AddResult{Path: p.rel, Added: true}, nil
+}
+
+type placement struct {
+	rel    string
+	target string
+	pkg    debfile.Package
+	exists bool
+}
+
+// placePackage validates and parses debPath and finds its pool path. exists
+// reports that the pool already holds the same bytes there.
+func placePackage(workdir, suite, component, debPath string) (placement, error) {
+	err := checkNames(suite, component)
+	if err != nil {
+		return placement{}, err
+	}
+
+	pkg, err := debfile.Open(debPath)
+	if err != nil {
+		return placement{}, fmt.Errorf("add %s: %w", debPath, err)
+	}
+
+	rel, err := poolPath(suite, component, pkg.Control.Fields)
+	if err != nil {
+		return placement{}, err
+	}
+
+	poolDir := filepath.Join(workdir, "public", "pool")
+	err = checkPoolConflicts(poolDir, path.Base(rel), pkg.SHA256)
+	if err != nil {
+		return placement{}, fmt.Errorf("add %s: %w", debPath, err)
+	}
+
+	p := placement{rel: rel, target: filepath.Join(workdir, "public", filepath.FromSlash(rel)), pkg: pkg}
+
+	existing, err := fileSHA256(p.target)
+	if err == nil {
+		if existing != pkg.SHA256 {
+			return placement{}, fmt.Errorf("add %s: %w", p.target, ErrConflict)
+		}
+
+		p.exists = true
+
+		return p, nil
+	}
+
+	if !errors.Is(err, os.ErrNotExist) {
+		return placement{}, fmt.Errorf("hash %s: %w", p.target, err)
+	}
+
+	return p, nil
 }
 
 func checkPoolConflicts(poolDir, filename, wantSHA256 string) error {

@@ -64,16 +64,15 @@ func (h *debHandlers) build(ctx context.Context, _ *xflags.Command, _ *buildConf
 		return errors.New("build takes no positional arguments")
 	}
 
+	// Build returns summaries with ErrUploadRejected after publishing, so the
+	// built lines are logged before the error is returned.
 	summaries, err := debrepo.Build(ctx, h.cfg.Workdir, time.Now())
-	if err != nil {
-		return err
-	}
 
 	for _, s := range summaries {
 		slog.InfoContext(ctx, "built", "suite", s.Suite, "packages", s.Packages, "architectures", s.Architectures)
 	}
 
-	return nil
+	return err
 }
 
 func nonEmpty(value any) error {
