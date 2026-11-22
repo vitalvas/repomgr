@@ -393,9 +393,7 @@ func TestBuildByHash(t *testing.T) {
 	_, err = Build(t.Context(), workdir, buildTime)
 	require.NoError(t, err)
 
-	kept, err := os.ReadFile(marker)
-	require.NoError(t, err)
-	assert.Equal(t, "kept", string(kept))
+	check(t, workdir, 3)
 	require.NoError(t, os.Remove(marker))
 
 	_, err = Build(t.Context(), workdir, buildTime)
@@ -716,8 +714,25 @@ func TestBuildPoolChecks(t *testing.T) {
 func TestStanza(t *testing.T) {
 	pkg := debfile.Package{Size: 7, MD5: "m", SHA1: "s1", SHA256: "s256"}
 
-	got := stanza("Version: 1\nPackage: foo", "pool/x.deb", pkg)
-	assert.Equal(t, "Package: foo\nVersion: 1\nFilename: pool/x.deb\nSize: 7\nMD5sum: m\nSHA1: s1\nSHA256: s256", got)
+	got := stanza("Version: 1\npAcKaGe: foo\nFilename: old\n obsolete\nsIzE: 99\nSHA256: old\nDescription: foo\n more", "pool/x.deb", pkg)
+	assert.Equal(t, "pAcKaGe: foo\nVersion: 1\nDescription: foo\n more\nFilename: pool/x.deb\nSize: 7\nMD5sum: m\nSHA1: s1\nSHA256: s256", got)
+}
+
+func TestBuildBadPoolKeepsPublishedSuite(t *testing.T) {
+	workdir := newWorkdir(t)
+	addPkg(t, workdir, "stable", "main", ctl("foo", "1.0", ""))
+
+	_, err := Build(t.Context(), workdir, buildTime)
+	require.NoError(t, err)
+	original := readPublic(t, workdir, "dists", "stable", "InRelease")
+
+	pool := filepath.Join(workdir, "public", "pool")
+	require.NoError(t, os.Rename(pool, filepath.Join(workdir, "old-pool")))
+	require.NoError(t, os.WriteFile(pool, nil, 0o644))
+
+	_, err = Build(t.Context(), workdir, buildTime)
+	require.ErrorContains(t, err, "is not a directory")
+	assert.Equal(t, original, readPublic(t, workdir, "dists", "stable", "InRelease"))
 }
 
 func captureLogs(t *testing.T) *bytes.Buffer {
@@ -850,8 +865,10 @@ func FuzzStanza(f *testing.F) {
 
 		assert.Contains(t, got, fmt.Sprintf("\nFilename: %s\nSize: 0\n", filename))
 
-		if strings.HasPrefix(raw, "Package:") {
-			assert.True(t, strings.HasPrefix(got, raw))
+		control, err := debfile.ParseControl(raw)
+		if err == nil && control.Validate() == nil {
+			name, _, _ := strings.Cut(got, ":")
+			assert.True(t, strings.EqualFold(name, "Package"))
 		}
 	})
 }

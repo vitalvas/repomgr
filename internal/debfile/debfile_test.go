@@ -161,8 +161,8 @@ func TestParse(t *testing.T) {
 		{"bad plain tar", buildAr("debian-binary", "2.0\n", "control.tar", bytes.Repeat([]byte("x"), 600)), "control.tar"},
 		{"no control entry", buildAr("debian-binary", "2.0\n", "control.tar.gz", gzTar(t, "./other", "x")), "has no control file"},
 		{"empty control tar", buildAr("debian-binary", "2.0\n", "control.tar.gz", gzTar(t, "", "")), "has no control file"},
-		{"huge size header over short data", []byte(fmt.Sprintf("!<arch>\n%-16s%-12d%-6d%-6d%-8s%-10d`\nabc", "debian-binary", 0, 0, 0, "100644", 9999999999)), "unexpected EOF"},
-		{"huge skipped member over short data", append(buildAr("debian-binary", "2.0\n", "", nil), []byte(fmt.Sprintf("%-16s%-12d%-6d%-6d%-8s%-10d`\nabc", "data.tar.gz", 0, 0, 0, "100644", 9999999999))...), "skip member data.tar.gz"},
+		{"huge size header over short data", []byte(fmt.Sprintf("!<arch>\n%-16s%-12d%-6d%-6d%-8s%-10d`\n2.0", "debian-binary", 0, 0, 0, "100644", 9999999999)), "EOF"},
+		{"huge skipped member over short data", append(buildAr("debian-binary", "2.0\n", "", nil), []byte(fmt.Sprintf("%-16s%-12d%-6d%-6d%-8s%-10d`\nabc", "_extra", 0, 0, 0, "100644", 9999999999))...), "skip member _extra"},
 		{"bad gzip", buildAr("debian-binary", "2.0\n", "control.tar.gz", []byte("not gzip")), "gzip"},
 		{"bad member header magic", append([]byte("!<arch>\n"), bytes.Repeat([]byte("x"), 60)...), "magic"},
 		{"bad member size", []byte(fmt.Sprintf("!<arch>\n%-16s%-12d%-6d%-6d%-8s%-10s`\n", "debian-binary", 0, 0, 0, "100644", "zz")), "size"},
@@ -203,15 +203,30 @@ func TestSkip(t *testing.T) {
 	})
 }
 
-func TestParseFields(t *testing.T) {
-	t.Run("stops at blank line and trims values", func(t *testing.T) {
-		f := parseFields("A:   one  \nB: two\n\nC: three")
-		assert.Equal(t, map[string]string{"A": "one", "B": "two"}, f)
+func TestParseControl(t *testing.T) {
+	control, err := ParseControl("pAcKaGe:   one  \nVersion: 1\nB: two\n\tmore")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"Package": "one", "Version": "1", "B": "two\n\tmore"}, control.Fields)
+
+	for _, raw := range []string{"A: one\n\nB: two", " orphan\nA: one", "A: one\nno colon", "Field Name: x", "A: one\na: two"} {
+		_, err := ParseControl(raw)
+		assert.ErrorIs(t, err, ErrInvalidField, "%q", raw)
+	}
+}
+
+func TestParseControlArchiveIntegrity(t *testing.T) {
+	t.Run("gzip checksum", func(t *testing.T) {
+		ctrl := gzTar(t, "./control", "Package: example\n")
+		ctrl[len(ctrl)-8] ^= 1
+		_, err := Parse(bytes.NewReader(buildAr("debian-binary", "2.0\n", "control.tar.gz", ctrl)))
+		require.ErrorIs(t, err, gzip.ErrChecksum)
 	})
 
-	t.Run("tab continuation and stray lines", func(t *testing.T) {
-		f := parseFields(" orphan\nnocolon\nA: x\n\ty")
-		assert.Equal(t, map[string]string{"A": "x\n\ty"}, f)
+	t.Run("CRLF", func(t *testing.T) {
+		ctrl := gzTar(t, "./control", "Package: example\r\nDescription: example\r\n long\r\n")
+		control, err := Parse(bytes.NewReader(buildAr("debian-binary", "2.0\n", "control.tar.gz", ctrl)))
+		require.NoError(t, err)
+		assert.Equal(t, "Package: example\nDescription: example\n long", control.Raw)
 	})
 }
 

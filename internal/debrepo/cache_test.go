@@ -50,6 +50,7 @@ func TestCache(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Equal(t, map[string]cacheEntry{res.Path: {
+			Version: cacheVersion,
 			Size:    pkg.Size,
 			MTime:   info.ModTime().UnixNano(),
 			Control: pkg.Control.Raw,
@@ -85,17 +86,18 @@ func TestCache(t *testing.T) {
 		fake := orig
 		fake.SHA256 = "fake"
 		entries[res.Path] = fake
+		require.NoError(t, saveCache(workdir, entries))
 
-		data, err := json.Marshal(entries)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(cachePath(workdir), data, 0o644))
-
+		logs := captureLogs(t)
 		_, err = Build(t.Context(), workdir, buildTime)
 		require.NoError(t, err)
+		assert.Contains(t, logs.String(), "msg=parsed ")
+		assert.Equal(t, orig, readCache(t, workdir)[res.Path])
 
-		pkgs, err := os.ReadFile(packagesPath(workdir))
+		logs.Reset()
+		_, err = Build(t.Context(), workdir, buildTime)
 		require.NoError(t, err)
-		assert.Contains(t, string(pkgs), "SHA256: fake\n")
+		assert.NotContains(t, logs.String(), "msg=parsed ")
 
 		target := filepath.Join(workdir, "public", filepath.FromSlash(res.Path))
 		require.NoError(t, os.Chtimes(target, time.Time{}, time.Now().Add(time.Hour)))
@@ -103,7 +105,7 @@ func TestCache(t *testing.T) {
 		_, err = Build(t.Context(), workdir, buildTime)
 		require.NoError(t, err)
 
-		pkgs, err = os.ReadFile(packagesPath(workdir))
+		pkgs, err := os.ReadFile(packagesPath(workdir))
 		require.NoError(t, err)
 		assert.Contains(t, string(pkgs), fmt.Sprintf("SHA256: %s\n", orig.SHA256))
 		assert.Equal(t, orig.SHA256, readCache(t, workdir)[res.Path].SHA256)
@@ -165,6 +167,7 @@ func TestCache(t *testing.T) {
 
 		_, err = Add(t.Context(), workdir, "stable", "main", writeDeb(t, ctl("foo", "1.0", "")))
 		require.Error(t, err)
+		assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
 	})
 }
 

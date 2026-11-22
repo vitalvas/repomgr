@@ -92,7 +92,7 @@ package and derives every path from it.
 | --- | --- |
 | Suite, component | `^[a-z0-9][a-z0-9_-]*$` |
 | `Package` | `^[a-z0-9][a-z0-9+.-]+$` |
-| `Version` | `^[0-9][A-Za-z0-9.+~:-]*$` |
+| `Version` | Debian version syntax with a numeric epoch when present, a digit-leading upstream version, and an optional Debian revision |
 | `Architecture` | One of `all`, `amd64`, `arm64`, `armel`, `armhf`, `i386` |
 | `<name>` | `Source` field without any version in parentheses, or `Package` when `Source` is absent |
 | `<prefix>` | `lib` plus the next letter for names starting with `lib`, otherwise the first letter |
@@ -122,7 +122,7 @@ that name are a conflict.
 3. Parse the package, validate its fields, and compute size, MD5, SHA1, and
    SHA256 in one read.
 4. Derive the target pool path.
-5. Look for the same file name under `pool/*/*/<prefix>/<name>/`. If any copy
+5. Look for the same file name anywhere in the pool. If any copy
    has a different SHA256, fail. If the target already holds the same bytes, do
    nothing. Otherwise copy.
 6. Copy to a temporary file in the target directory and rename it into place.
@@ -131,19 +131,18 @@ that name are a conflict.
 ### build
 
 1. Load `config/repo.yaml`, `config/signing.asc`, and `cache/index.json`.
-2. Walk `pool/`. Reuse a cache entry when size and mtime match; otherwise parse
-   and hash the file again. Drop entries for missing files and save the cache.
+2. Walk `pool/`. Reuse a valid cache entry when size and mtime match. Otherwise,
+   parse and hash the file again. Drop entries for missing files and save the cache.
 3. Fail if a package isn't at the path its control fields produce, or if the
-   same `Package`, `Version`, and `Architecture` appears with different SHA256
-   anywhere in the pool.
+   same pool file name appears with different SHA256 anywhere in the pool.
 4. Group packages by suite, component, and architecture. `Architecture: all`
    packages go only to `binary-all`.
 5. Generate every `Packages` index with its `.gz` and `.zst` forms, every
    per-directory `Release`, the top-level `Release`, `InRelease`, and
    `Release.gpg` in memory. A failure up to this step leaves `dists/` as it
    was.
-6. Write the new by-hash files. Their names are content hashes, so this step
-   never overwrites a file a client may be reading.
+6. Write missing by-hash files and atomically repair any current by-hash files
+   whose content differs from the rendered index.
 7. Replace the canonical `Packages`, `Packages.gz`, `Packages.zst`, and
    per-directory `Release` files with a temporary file and rename.
 8. Replace `Release` and `Release.gpg`, then `InRelease` last.
@@ -154,10 +153,11 @@ that name are a conflict.
 
 ### Packages
 
-Each stanza is the package control paragraph copied exactly, with `Package`
-first, followed by `Filename`, `Size`, `MD5sum`, `SHA1`, and `SHA256`. `build`
-sorts stanzas by `Package`, then `Filename`, so the same pool always produces
-the same output.
+Each stanza starts with the package control paragraph, with `Package` moved
+to the first line. The build supplies `Filename`, `Size`, `MD5sum`, `SHA1`,
+and `SHA256` from the indexed file and replaces any copies of those fields
+in the control paragraph. `build` sorts stanzas by `Package`, then `Filename`,
+so the same pool always produces the same output.
 
 ### Per-directory Release
 

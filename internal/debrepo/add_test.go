@@ -246,6 +246,15 @@ func TestAddCrossPool(t *testing.T) {
 	}
 }
 
+func TestAddRejectsConflictAcrossSources(t *testing.T) {
+	workdir := newWorkdir(t)
+	addPkg(t, workdir, "stable", "main", ctl("foo", "1.0", "Source: first\n"))
+
+	_, err := Add(t.Context(), workdir, "testing", "main", writeDeb(t, ctl("foo", "1.0", "Source: second\n")))
+	require.ErrorIs(t, err, ErrConflict)
+	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool", "testing"))
+}
+
 func TestAddGlobMetaWorkdir(t *testing.T) {
 	workdir := filepath.Join(t.TempDir(), "w[1]")
 	require.NoError(t, os.MkdirAll(workdir, 0o755))

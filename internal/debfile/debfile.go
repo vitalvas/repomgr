@@ -2,32 +2,33 @@ package debfile
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
 )
 
 const (
-	arMagic       string = "!<arch>\n"
-	arHeaderSize  int    = 60
-	arNameEnd     int    = 16
-	arSizeStart   int    = 48
-	arSizeEnd     int    = 58
-	arEndMarker   string = "`\n"
-	binaryName    string = "debian-binary"
-	controlPrefix string = "control.tar"
-	controlPlain  string = "control.tar"
-	controlGzip   string = "control.tar.gz"
-	controlXz     string = "control.tar.xz"
-	controlZstd   string = "control.tar.zst"
-	binaryVersion string = "2."
+	arMagic        string = "!<arch>\n"
+	arHeaderSize   int    = 60
+	arNameEnd      int    = 16
+	arSizeStart    int    = 48
+	arSizeEnd      int    = 58
+	arEndMarker    string = "`\n"
+	binaryName     string = "debian-binary"
+	controlPrefix  string = "control.tar"
+	controlPlain   string = "control.tar"
+	controlGzip    string = "control.tar.gz"
+	controlXz      string = "control.tar.xz"
+	controlZstd    string = "control.tar.zst"
+	binaryVersion  string = "2."
+	maxControlSize int64  = 16 << 20
 )
 
 type Control struct {
@@ -46,34 +47,36 @@ func Parse(r io.Reader) (Control, error) {
 		return Control{}, errors.New("not an ar archive")
 	}
 
-	first := true
+	first, err := readHeader(r)
+	if err != nil {
+		return Control{}, fmt.Errorf("read %s: %w", binaryName, err)
+	}
 
+	if err := checkBinary(r, first); err != nil {
+		return Control{}, err
+	}
+
+	m, err := nextRequiredMember(r)
+	if err != nil {
+		return Control{}, fmt.Errorf("read control archive: %w", err)
+	}
+
+	if !strings.HasPrefix(m.name, controlPrefix) {
+		return Control{}, fmt.Errorf("expected control archive, found %s", m.name)
+	}
+
+	return readControl(r, m)
+}
+
+func nextRequiredMember(r io.Reader) (arMember, error) {
 	for {
 		m, err := readHeader(r)
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return Control{}, errors.New("no control archive found")
-			}
-
-			return Control{}, err
-		}
-
-		if first {
-			first = false
-
-			if err := checkBinary(r, m); err != nil {
-				return Control{}, err
-			}
-
-			continue
-		}
-
-		if strings.HasPrefix(m.name, controlPrefix) {
-			return readControl(r, m)
+		if err != nil || !strings.HasPrefix(m.name, "_") {
+			return m, err
 		}
 
 		if err := skip(r, m.size); err != nil {
-			return Control{}, fmt.Errorf("skip member %s: %w", m.name, err)
+			return arMember{}, fmt.Errorf("skip member %s: %w", m.name, err)
 		}
 	}
 }
@@ -119,70 +122,58 @@ func skip(r io.Reader, size int64) error {
 	return nil
 }
 
-// readData reads a member's data and consumes its padding byte.
-func readData(r io.Reader, m arMember) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(r, m.size))
-	if err != nil {
-		return nil, fmt.Errorf("read member %s: %w", m.name, err)
-	}
-
-	if int64(len(data)) != m.size {
-		return nil, fmt.Errorf("read member %s: %w", m.name, io.ErrUnexpectedEOF)
-	}
-
-	if m.size%2 == 1 {
-		if _, err := io.CopyN(io.Discard, r, 1); err != nil {
-			return nil, fmt.Errorf("read member %s padding: %w", m.name, err)
-		}
-	}
-
-	return data, nil
-}
-
 func checkBinary(r io.Reader, m arMember) error {
 	if m.name != binaryName {
 		return fmt.Errorf("first ar member is %q, want %s", m.name, binaryName)
 	}
 
-	data, err := readData(r, m)
-	if err != nil {
-		return err
+	var prefix [len(binaryVersion)]byte
+	if m.size < int64(len(prefix)) {
+		return fmt.Errorf("unsupported %s version", binaryName)
 	}
 
-	if !bytes.HasPrefix(data, []byte(binaryVersion)) {
-		return fmt.Errorf("unsupported %s version %q", binaryName, strings.TrimSpace(string(data)))
+	if _, err := io.ReadFull(r, prefix[:]); err != nil {
+		return fmt.Errorf("read %s: %w", binaryName, err)
+	}
+
+	if string(prefix[:]) != binaryVersion {
+		return fmt.Errorf("unsupported %s version", binaryName)
+	}
+
+	// The prefix is two bytes, so the remaining size has the same padding.
+	if err := skip(r, m.size-int64(len(prefix))); err != nil {
+		return fmt.Errorf("read %s: %w", binaryName, err)
 	}
 
 	return nil
 }
 
 func readControl(r io.Reader, m arMember) (Control, error) {
-	data, err := readData(r, m)
-	if err != nil {
-		return Control{}, err
-	}
+	member := &io.LimitedReader{R: r, N: m.size}
 
 	var src io.Reader
 
 	switch m.name {
 	case controlPlain:
-		src = bytes.NewReader(data)
+		src = member
 	case controlGzip:
-		zr, err := gzip.NewReader(bytes.NewReader(data))
+		zr, err := gzip.NewReader(member)
 		if err != nil {
 			return Control{}, fmt.Errorf("open gzip of %s: %w", m.name, err)
 		}
 
+		defer zr.Close()
+
 		src = zr
 	case controlXz:
-		xr, err := xz.NewReader(bytes.NewReader(data))
+		xr, err := xz.NewReader(member)
 		if err != nil {
 			return Control{}, fmt.Errorf("open xz of %s: %w", m.name, err)
 		}
 
 		src = xr
 	case controlZstd:
-		zr, err := zstd.NewReader(bytes.NewReader(data))
+		zr, err := zstd.NewReader(member, zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(128<<20))
 		if err != nil {
 			return Control{}, fmt.Errorf("open zstd of %s: %w", m.name, err)
 		}
@@ -194,64 +185,145 @@ func readControl(r io.Reader, m arMember) (Control, error) {
 		return Control{}, fmt.Errorf("unsupported control archive %s", m.name)
 	}
 
+	control, err := readControlTar(src, m.name)
+	if err != nil {
+		return Control{}, err
+	}
+
+	// Reading to the end verifies the compression trailer.
+	if _, err := io.Copy(io.Discard, src); err != nil {
+		return Control{}, fmt.Errorf("finish %s: %w", m.name, err)
+	}
+
+	if member.N != 0 {
+		return Control{}, fmt.Errorf("read member %s: %w", m.name, io.ErrUnexpectedEOF)
+	}
+
+	if _, err := io.CopyN(io.Discard, r, m.size%2); err != nil {
+		return Control{}, fmt.Errorf("read member %s padding: %w", m.name, err)
+	}
+
+	return control, nil
+}
+
+func readControlTar(src io.Reader, name string) (Control, error) {
 	tr := tar.NewReader(src)
+	var content []byte
 
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return Control{}, fmt.Errorf("%s has no control file", m.name)
+			break
 		}
 
 		if err != nil {
-			return Control{}, fmt.Errorf("read tar of %s: %w", m.name, err)
+			return Control{}, fmt.Errorf("read tar of %s: %w", name, err)
 		}
 
 		if hdr.Name != "./control" && hdr.Name != "control" {
 			continue
 		}
 
-		content, err := io.ReadAll(tr)
+		if content != nil || hdr.Typeflag != tar.TypeReg {
+			return Control{}, fmt.Errorf("%s must contain exactly one regular control file", name)
+		}
+
+		if hdr.Size > maxControlSize {
+			return Control{}, fmt.Errorf("control file of %s exceeds %d bytes", name, maxControlSize)
+		}
+
+		content, err = io.ReadAll(tr)
 		if err != nil {
-			return Control{}, fmt.Errorf("read control file of %s: %w", m.name, err)
+			return Control{}, fmt.Errorf("read control file of %s: %w", name, err)
 		}
-
-		raw := strings.TrimRight(string(content), "\n")
-
-		for line := range strings.SplitSeq(raw, "\n") {
-			if strings.TrimSpace(line) == "" {
-				return Control{}, fmt.Errorf("%w: %s control file has more than one paragraph", ErrInvalidField, m.name)
-			}
-		}
-
-		return Control{Raw: raw, Fields: parseFields(raw)}, nil
 	}
+
+	if content == nil {
+		return Control{}, fmt.Errorf("%s has no control file", name)
+	}
+
+	control, err := ParseControl(strings.TrimRight(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n"))
+	if err != nil {
+		return Control{}, fmt.Errorf("parse control file of %s: %w", name, err)
+	}
+
+	return control, nil
 }
 
-func parseFields(raw string) map[string]string {
+// ParseControl parses a normalized binary package control paragraph.
+func ParseControl(raw string) (Control, error) {
+	if !utf8.ValidString(raw) || strings.ContainsAny(raw, "\r\x00") {
+		return Control{}, fmt.Errorf("%w: invalid control text", ErrInvalidField)
+	}
+
 	fields := make(map[string]string)
-	last := ""
+	seen := make(map[string]bool)
+	var (
+		last  string
+		value strings.Builder
+	)
 
 	for line := range strings.SplitSeq(raw, "\n") {
-		if strings.TrimSpace(line) == "" {
-			break
+		if strings.Trim(line, " \t") == "" {
+			return Control{}, fmt.Errorf("%w: empty line in control paragraph", ErrInvalidField)
 		}
 
 		if line[0] == ' ' || line[0] == '\t' {
-			if last != "" {
-				fields[last] = fmt.Sprintf("%s\n%s", fields[last], line)
+			if last == "" {
+				return Control{}, fmt.Errorf("%w: continuation without a field", ErrInvalidField)
 			}
 
+			value.WriteByte('\n')
+			value.WriteString(line)
 			continue
 		}
 
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
+		if last != "" {
+			fields[last] = value.String()
+			value.Reset()
 		}
 
+		name, data, ok := strings.Cut(line, ":")
+		if !ok || !validFieldName(name) {
+			return Control{}, fmt.Errorf("%w: malformed field name %q", ErrInvalidField, name)
+		}
+
+		lower := strings.ToLower(name)
+		if seen[lower] {
+			return Control{}, fmt.Errorf("%w: duplicate field %s", ErrInvalidField, name)
+		}
+
+		seen[lower] = true
 		last = name
-		fields[name] = strings.TrimSpace(value)
+		switch lower {
+		case "package":
+			last = "Package"
+		case "version":
+			last = "Version"
+		case "architecture":
+			last = "Architecture"
+		case "source":
+			last = "Source"
+		}
+
+		value.WriteString(strings.Trim(data, " \t"))
 	}
 
-	return fields
+	fields[last] = value.String()
+
+	return Control{Raw: raw, Fields: fields}, nil
+}
+
+func validFieldName(name string) bool {
+	if name == "" || name[0] == '#' || name[0] == '-' {
+		return false
+	}
+
+	for _, c := range name {
+		if c < '!' || c > '~' {
+			return false
+		}
+	}
+
+	return true
 }

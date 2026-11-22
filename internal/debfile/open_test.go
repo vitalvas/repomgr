@@ -80,6 +80,9 @@ func TestOpen(t *testing.T) {
 			"package slash":        controlOf("a/b", "1.0", "amd64"),
 			"version letter":       controlOf("hello", "v1.0", "amd64"),
 			"version slash":        controlOf("hello", "1.0/x", "amd64"),
+			"invalid epoch":        controlOf("hello", "1.0:2.0", "amd64"),
+			"empty upstream":       controlOf("hello", "1:", "amd64"),
+			"empty revision":       controlOf("hello", "1.0-", "amd64"),
 			"arch riscv64":         controlOf("hello", "1.0", "riscv64"),
 			"missing package":      "Version: 1.0\nArchitecture: amd64\n",
 			"missing version":      "Package: hello\nArchitecture: amd64\n",
@@ -119,6 +122,21 @@ func TestOpen(t *testing.T) {
 		_, err := Open(path)
 		require.Error(t, err)
 	})
+}
+
+func TestOpenRequiresCompleteDataMember(t *testing.T) {
+	raw := controlOf("hello", "1.0", "amd64")
+	path, valid := writeDeb(t, raw)
+	missing := buildAr("debian-binary", "2.0\n", "control.tar.gz", gzTar(t, "./control", raw))
+
+	for _, tc := range []struct {
+		data []byte
+		want string
+	}{{missing, "data archive"}, {valid[:len(valid)-2], "data.tar.gz"}} {
+		require.NoError(t, os.WriteFile(path, tc.data, 0o600))
+		_, err := Open(path)
+		require.ErrorContains(t, err, tc.want)
+	}
 }
 
 func FuzzOpen(f *testing.F) {

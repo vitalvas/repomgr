@@ -90,6 +90,17 @@ func TestInit(t *testing.T) {
 		assert.FileExists(t, filepath.Join(workdir, "config", "signing.asc"))
 	})
 
+	t.Run("config path is a directory", func(t *testing.T) {
+		workdir := t.TempDir()
+		configPath := filepath.Join(workdir, "config", "repo.yaml")
+		require.NoError(t, os.MkdirAll(configPath, 0o755))
+
+		err := Init(t.Context(), workdir, "Repo", "repo@example.com")
+		require.ErrorContains(t, err, "is not a regular file")
+		assert.NoFileExists(t, filepath.Join(workdir, "config", "signing.asc"))
+		assert.NoFileExists(t, filepath.Join(workdir, "public", "key.gpg"))
+	})
+
 	t.Run("key generation failure leaves workdir untouched", func(t *testing.T) {
 		workdir := filepath.Join(t.TempDir(), "wd")
 

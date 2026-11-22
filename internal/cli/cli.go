@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"time"
 
 	"go.vitalvas.com/gokit/xflags"
@@ -42,26 +43,42 @@ func (h *debHandlers) add(ctx context.Context, _ *xflags.Command, cfg *addConfig
 	}
 
 	if res.Added {
-		slog.Info("added", "path", res.Path)
+		slog.InfoContext(ctx, "added", "path", path.Join("public", res.Path))
 	} else {
-		slog.Info("unchanged", "path", res.Path)
+		slog.InfoContext(ctx, "unchanged", "path", path.Join("public", res.Path))
 	}
 
 	return nil
 }
 
-func (h *debHandlers) init(ctx context.Context, _ *xflags.Command, cfg *initConfig, _ []string) error {
+func (h *debHandlers) init(ctx context.Context, _ *xflags.Command, cfg *initConfig, args []string) error {
+	if len(args) != 0 {
+		return errors.New("init takes no positional arguments")
+	}
+
 	return debrepo.Init(ctx, h.cfg.Workdir, cfg.Name, cfg.Email)
 }
 
-func (h *debHandlers) build(ctx context.Context, _ *xflags.Command, _ *buildConfig, _ []string) error {
+func (h *debHandlers) build(ctx context.Context, _ *xflags.Command, _ *buildConfig, args []string) error {
+	if len(args) != 0 {
+		return errors.New("build takes no positional arguments")
+	}
+
 	summaries, err := debrepo.Build(ctx, h.cfg.Workdir, time.Now())
 	if err != nil {
 		return err
 	}
 
 	for _, s := range summaries {
-		slog.Info("built", "suite", s.Suite, "packages", s.Packages, "architectures", s.Architectures)
+		slog.InfoContext(ctx, "built", "suite", s.Suite, "packages", s.Packages, "architectures", s.Architectures)
+	}
+
+	return nil
+}
+
+func nonEmpty(value any) error {
+	if value == "" {
+		return errors.New("must not be empty")
 	}
 
 	return nil
@@ -83,7 +100,15 @@ func New(version string) (*xflags.Parser, error) {
 		return nil, err
 	}
 
-	err = errors.Join(deb.AddCommand(initCmd), deb.AddCommand(addCmd), deb.AddCommand(buildCmd), p.AddCommand(deb))
+	err = errors.Join(
+		deb.Validate("workdir", nonEmpty),
+		initCmd.Validate("name", nonEmpty),
+		initCmd.Validate("email", nonEmpty),
+		deb.AddCommand(initCmd),
+		deb.AddCommand(addCmd),
+		deb.AddCommand(buildCmd),
+		p.AddCommand(deb),
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -229,36 +229,16 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		})
 	}
 
-	for _, f := range byHashFiles {
-		_, err = os.Stat(f.path)
-		if err == nil {
-			continue
-		}
-
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("stat %s: %w", f.path, err)
-		}
-
-		err = writeAtomic(f.path, bytes.NewReader(f.data), nil)
-		if err != nil {
-			return nil, err
-		}
-
-		slog.InfoContext(ctx, "added by-hash", "path", logPath(workdir, f.path))
+	if err := publishFiles(ctx, workdir, byHashFiles, "added by-hash"); err != nil {
+		return nil, err
 	}
 
-	for _, f := range slices.Concat(packageFiles, suiteFiles) {
-		current, readErr := os.ReadFile(f.path)
-		if readErr == nil && bytes.Equal(current, f.data) {
-			continue
-		}
+	if err := publishFiles(ctx, workdir, packageFiles, "updated"); err != nil {
+		return nil, err
+	}
 
-		err = writeAtomic(f.path, bytes.NewReader(f.data), nil)
-		if err != nil {
-			return nil, err
-		}
-
-		slog.InfoContext(ctx, "updated", "path", logPath(workdir, f.path))
+	if err := publishFiles(ctx, workdir, suiteFiles, "updated"); err != nil {
+		return nil, err
 	}
 
 	err = pruneByHash(ctx, workdir, byHashFiles, now)
@@ -272,6 +252,30 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 	}
 
 	return summaries, nil
+}
+
+func publishFiles(ctx context.Context, workdir string, files []outputFile, createdMessage string) error {
+	for _, f := range files {
+		current, err := os.ReadFile(f.path)
+		if err == nil && bytes.Equal(current, f.data) {
+			continue
+		}
+
+		message := "updated"
+		if errors.Is(err, os.ErrNotExist) {
+			message = createdMessage
+		} else if err != nil {
+			return fmt.Errorf("read %s: %w", f.path, err)
+		}
+
+		if err := writeAtomic(f.path, bytes.NewReader(f.data), 0o644, nil); err != nil {
+			return err
+		}
+
+		slog.InfoContext(ctx, message, "path", logPath(workdir, f.path))
+	}
+
+	return nil
 }
 
 // pruneByHash keeps the current by-hash files plus the two previous versions
@@ -414,18 +418,17 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 	fresh := make(map[string]cacheEntry)
 	seenSums := make(map[string]sumSeen)
 
-	_, err := os.Stat(pool)
-	if errors.Is(err, os.ErrNotExist) {
-		return indexes, fresh, nil
-	}
-
-	err = filepath.WalkDir(pool, func(file string, d fs.DirEntry, err error) error {
+	err := walkPool(pool, func(file string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if !d.Type().IsRegular() || !strings.HasSuffix(file, ".deb") {
+		if d.IsDir() || !strings.HasSuffix(file, ".deb") {
 			return nil
+		}
+
+		if !d.Type().IsRegular() {
+			return fmt.Errorf("build %s: %w: package is not a regular file", file, ErrMisplaced)
 		}
 
 		rel, err := filepath.Rel(pool, file)
@@ -445,7 +448,7 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 
 		filename := path.Join("pool", filepath.ToSlash(rel))
 
-		info, err := os.Stat(file)
+		info, err := d.Info()
 		if err != nil {
 			return fmt.Errorf("stat %s: %w", file, err)
 		}
@@ -500,14 +503,52 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 	return indexes, fresh, nil
 }
 
-func stanza(raw, filename string, pkg debfile.Package) string {
-	lines := strings.Split(raw, "\n")
+func walkPool(pool string, visit fs.WalkDirFunc) error {
+	info, err := os.Lstat(pool)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 
-	i := slices.IndexFunc(lines, func(line string) bool { return strings.HasPrefix(line, "Package:") })
-	if i > 0 {
-		first := lines[i]
-		lines = slices.Delete(lines, i, i+1)
-		lines = slices.Insert(lines, 0, first)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", pool, err)
+	}
+
+	if !info.IsDir() {
+		return fmt.Errorf("pool %s is not a directory", pool)
+	}
+
+	return filepath.WalkDir(pool, visit)
+}
+
+func stanza(raw, filename string, pkg debfile.Package) string {
+	var lines []string
+	var packageLine string
+	skipField := false
+
+	for line := range strings.SplitSeq(raw, "\n") {
+		if line != "" && (line[0] == ' ' || line[0] == '\t') {
+			if !skipField {
+				lines = append(lines, line)
+			}
+
+			continue
+		}
+
+		name, _, _ := strings.Cut(line, ":")
+		skipField = false
+
+		switch strings.ToLower(name) {
+		case "package":
+			packageLine = line
+		case "filename", "size", "md5sum", "sha1", "sha256":
+			skipField = true
+		default:
+			lines = append(lines, line)
+		}
+	}
+
+	if packageLine != "" {
+		lines = slices.Insert(lines, 0, packageLine)
 	}
 
 	lines = append(lines,
@@ -626,7 +667,7 @@ func gzipBytes(data []byte) ([]byte, error) {
 // writeAtomic writes r to target through a temp file and a rename. A non-nil
 // verify runs after the data is written and before the rename; a failure
 // removes the temp file and leaves target untouched.
-func writeAtomic(target string, r io.Reader, verify func() error) error {
+func writeAtomic(target string, r io.Reader, mode fs.FileMode, verify func() error) error {
 	dir := filepath.Dir(target)
 
 	err := os.MkdirAll(dir, 0o755)
@@ -654,7 +695,7 @@ func writeAtomic(target string, r io.Reader, verify func() error) error {
 	}
 
 	if err == nil {
-		err = os.Chmod(tmp.Name(), 0o644)
+		err = os.Chmod(tmp.Name(), mode)
 	}
 
 	if err == nil {

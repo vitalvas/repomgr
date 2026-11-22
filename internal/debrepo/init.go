@@ -1,12 +1,14 @@
 package debrepo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.vitalvas.com/repomgr/internal/pgpsign"
 )
@@ -22,7 +24,7 @@ func Init(ctx context.Context, workdir, name, email string) error {
 	configPath := filepath.Join(workdir, "config", "repo.yaml")
 	keyPath := filepath.Join(workdir, "config", "signing.asc")
 
-	_, err := os.Stat(keyPath)
+	_, err := os.Lstat(keyPath)
 	if err == nil {
 		return fmt.Errorf("init %s: %w", keyPath, ErrAlreadyInitialized)
 	}
@@ -45,35 +47,37 @@ func Init(ctx context.Context, workdir, name, email string) error {
 		}
 	}
 
-	_, err = os.Stat(configPath)
+	configInfo, err := os.Stat(configPath)
 
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		err = os.WriteFile(configPath, []byte(repoConfigContent), 0o644)
+		err = writeAtomic(configPath, strings.NewReader(repoConfigContent), 0o644, nil)
 		if err != nil {
-			return fmt.Errorf("write %s: %w", configPath, err)
+			return err
 		}
 
 		slog.InfoContext(ctx, "created", "path", logPath(workdir, configPath))
 	case err != nil:
 		return fmt.Errorf("stat %s: %w", configPath, err)
+	case !configInfo.Mode().IsRegular():
+		return fmt.Errorf("config %s is not a regular file", configPath)
 	default:
 		slog.InfoContext(ctx, "kept", "path", logPath(workdir, configPath))
 	}
 
 	publicPath := filepath.Join(workdir, "public", "key.gpg")
 
-	err = os.WriteFile(publicPath, key.Public, 0o644)
+	err = writeAtomic(publicPath, bytes.NewReader(key.Public), 0o644, nil)
 	if err != nil {
-		return fmt.Errorf("write %s: %w", publicPath, err)
+		return err
 	}
 
 	slog.InfoContext(ctx, "created", "path", logPath(workdir, publicPath))
 
 	// signing.asc is written last: its presence marks the workdir as initialized.
-	err = os.WriteFile(keyPath, key.Private, 0o600)
+	err = writeAtomic(keyPath, bytes.NewReader(key.Private), 0o600, nil)
 	if err != nil {
-		return fmt.Errorf("write %s: %w", keyPath, err)
+		return err
 	}
 
 	slog.InfoContext(ctx, "created", "path", logPath(workdir, keyPath))

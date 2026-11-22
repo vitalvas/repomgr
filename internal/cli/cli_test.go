@@ -101,6 +101,29 @@ func TestDebBuild(t *testing.T) {
 	})
 }
 
+func TestUnexpectedPositionals(t *testing.T) {
+	dir := t.TempDir()
+	err := run(t, "deb", "--workdir", dir, "init", "--name", "Repo", "--email", "repo@example.com", "extra")
+	require.ErrorContains(t, err, "init takes no positional arguments")
+	assert.NoDirExists(t, filepath.Join(dir, "config"))
+
+	err = run(t, "deb", "--workdir", dir, "build", "extra")
+	require.ErrorContains(t, err, "build takes no positional arguments")
+}
+
+func TestEmptyRequiredOptions(t *testing.T) {
+	dir := t.TempDir()
+	err := run(t, "deb", "--workdir=", "build")
+	require.ErrorContains(t, err, "--workdir")
+
+	err = run(t, "deb", "--workdir", dir, "init", "--name=", "--email", "repo@example.com")
+	require.ErrorContains(t, err, "--name")
+
+	err = run(t, "deb", "--workdir", dir, "init", "--name", "Repo", "--email=")
+	require.ErrorContains(t, err, "--email")
+	assert.NoDirExists(t, filepath.Join(dir, "config"))
+}
+
 func TestDebInit(t *testing.T) {
 	t.Run("creates layout and keys", func(t *testing.T) {
 		dir := t.TempDir()

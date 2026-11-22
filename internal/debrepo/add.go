@@ -59,26 +59,10 @@ func Add(_ context.Context, workdir, suite, component, debPath string) (AddResul
 		return AddResult{}, err
 	}
 
-	tail := strings.TrimPrefix(rel, fmt.Sprintf("pool/%s/%s/", suite, component))
-
 	poolDir := filepath.Join(workdir, "public", "pool")
-
-	matches, err := fs.Glob(os.DirFS(poolDir), path.Join("*", "*", tail))
+	err = checkPoolConflicts(poolDir, path.Base(rel), pkg.SHA256)
 	if err != nil {
-		return AddResult{}, fmt.Errorf("glob %s: %w", tail, err)
-	}
-
-	for _, rest := range matches {
-		match := filepath.Join(poolDir, filepath.FromSlash(rest))
-
-		sum, err := fileSHA256(match)
-		if err != nil {
-			return AddResult{}, fmt.Errorf("hash %s: %w", match, err)
-		}
-
-		if sum != pkg.SHA256 {
-			return AddResult{}, fmt.Errorf("add %s: different content at %s: %w", debPath, match, ErrConflict)
-		}
+		return AddResult{}, fmt.Errorf("add %s: %w", debPath, err)
 	}
 
 	target := filepath.Join(workdir, "public", filepath.FromSlash(rel))
@@ -96,29 +80,60 @@ func Add(_ context.Context, workdir, suite, component, debPath string) (AddResul
 		return AddResult{}, fmt.Errorf("hash %s: %w", target, err)
 	}
 
-	err = copyVerified(debPath, target, pkg.SHA256)
-	if err != nil {
-		return AddResult{}, err
-	}
-
-	info, err := os.Stat(target)
-	if err != nil {
-		return AddResult{}, fmt.Errorf("stat %s: %w", target, err)
-	}
-
 	cache, err := loadCache(workdir)
 	if err != nil {
 		return AddResult{}, err
 	}
 
-	cache[rel] = newCacheEntry(info, pkg)
-
-	err = saveCache(workdir, cache)
+	err = copyVerified(debPath, target, pkg.SHA256)
 	if err != nil {
 		return AddResult{}, err
 	}
 
+	err = cacheAddedPackage(workdir, target, rel, pkg, cache)
+	if err != nil {
+		if rollbackErr := os.Remove(target); rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove %s after cache failure: %w", target, rollbackErr))
+		}
+
+		return AddResult{}, err
+	}
+
 	return AddResult{Path: rel, Added: true}, nil
+}
+
+func checkPoolConflicts(poolDir, filename, wantSHA256 string) error {
+	return walkPool(poolDir, func(file string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() || entry.Name() != filename {
+			return err
+		}
+
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("package %s is not a regular file", file)
+		}
+
+		sum, err := fileSHA256(file)
+		if err != nil {
+			return fmt.Errorf("hash %s: %w", file, err)
+		}
+
+		if sum != wantSHA256 {
+			return fmt.Errorf("different content at %s: %w", file, ErrConflict)
+		}
+
+		return nil
+	})
+}
+
+func cacheAddedPackage(workdir, target, rel string, pkg debfile.Package, cache map[string]cacheEntry) error {
+	info, err := os.Stat(target)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", target, err)
+	}
+
+	cache[rel] = newCacheEntry(info, pkg)
+
+	return saveCache(workdir, cache)
 }
 
 func checkNames(suite, component string) error {
@@ -192,7 +207,7 @@ func copyVerified(src, target, wantSHA256 string) error {
 
 	h := sha256.New()
 
-	return writeAtomic(target, io.TeeReader(in, h), func() error {
+	return writeAtomic(target, io.TeeReader(in, h), 0o644, func() error {
 		if hex.EncodeToString(h.Sum(nil)) != wantSHA256 {
 			return fmt.Errorf("%s changed during the add", src)
 		}
