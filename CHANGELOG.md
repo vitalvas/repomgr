@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/vitalvas/repomgr/compare/v0.4.0...v0.5.0) (2026-11-22)
+
+
+### Features
+
+* add architecture directory to pool layout ([afb3108](https://github.com/vitalvas/repomgr/commit/afb310852eab98886d2dfef9180831eff5ad8aee))
+
 ## [0.4.0](https://github.com/vitalvas/repomgr/compare/v0.3.3...v0.4.0) (2026-11-22)
 
 
