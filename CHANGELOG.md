@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/vitalvas/repomgr/compare/v0.3.2...v0.3.3) (2026-11-22)
+
+
+### Bug Fixes
+
+* add upload releases ([58eaa12](https://github.com/vitalvas/repomgr/commit/58eaa125914da91ee209a689dd9d87850d21ba63))
+
 ## [0.3.2](https://github.com/vitalvas/repomgr/compare/v0.3.1...v0.3.2) (2026-11-22)
 
 
