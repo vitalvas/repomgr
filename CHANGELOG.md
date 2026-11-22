@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/vitalvas/repomgr/compare/v0.1.0...v0.2.0) (2026-11-22)
+
+
+### Features
+
+* restore public keys on build, add key.asc, make email optional ([3a34efd](https://github.com/vitalvas/repomgr/commit/3a34efd6f1eb61030e92324fec566396ab21836d))
+
 ## [0.1.0](https://github.com/vitalvas/repomgr/compare/v0.0.1...v0.1.0) (2026-11-22)
 
 
