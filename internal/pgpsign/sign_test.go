@@ -126,6 +126,50 @@ func TestSign(t *testing.T) {
 	})
 }
 
+func TestVerify(t *testing.T) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(t, err)
+
+	other, err := GenerateKey("Other", "other@example.com")
+	require.NoError(t, err)
+
+	message := []byte(sampleRelease)
+
+	signed, err := Sign(key.Private, message)
+	require.NoError(t, err)
+
+	otherSigned, err := Sign(other.Private, message)
+	require.NoError(t, err)
+
+	changed := bytes.Clone(message)
+	changed[0] ^= 1
+
+	changedSigned, err := Sign(key.Private, changed)
+	require.NoError(t, err)
+
+	require.NoError(t, Verify(key.Public, message, signed))
+
+	cases := map[string]struct {
+		public  []byte
+		message []byte
+		signed  Signed
+	}{
+		"changed message":         {key.Public, changed, signed},
+		"wrong key":               {other.Public, message, signed},
+		"detached from other key": {key.Public, message, Signed{Clear: signed.Clear, Detached: otherSigned.Detached}},
+		"clear from other key":    {key.Public, message, Signed{Clear: otherSigned.Clear, Detached: signed.Detached}},
+		"clear of other message":  {key.Public, message, Signed{Clear: changedSigned.Clear, Detached: signed.Detached}},
+		"empty signatures":        {key.Public, message, Signed{}},
+		"garbage public key":      {[]byte("not a key"), message, signed},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			assert.Error(t, Verify(tc.public, tc.message, tc.signed))
+		})
+	}
+}
+
 func BenchmarkSign(b *testing.B) {
 	key, err := GenerateKey("Repo Signer", "repo@example.com")
 	require.NoError(b, err)

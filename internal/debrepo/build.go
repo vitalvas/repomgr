@@ -223,13 +223,24 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 	for _, suite := range slices.Sorted(maps.Keys(suites)) {
 		info := suites[suite]
 		release := renderRelease(suite, cfg, info, now)
+		dir := filepath.Join(public, "dists", suite)
+
+		summary := SuiteSummary{
+			Suite:         suite,
+			Packages:      info.packages,
+			Architectures: slices.Sorted(maps.Keys(info.archs)),
+		}
+
+		if releaseCurrent(dir, release, publicKey) {
+			summaries = append(summaries, summary)
+
+			continue
+		}
 
 		signed, err := pgpsign.Sign(privateKey, release)
 		if err != nil {
 			return nil, fmt.Errorf("sign release for suite %s: %w", suite, err)
 		}
-
-		dir := filepath.Join(public, "dists", suite)
 
 		suiteFiles = append(suiteFiles,
 			outputFile{path: filepath.Join(dir, "Release"), data: release},
@@ -237,11 +248,7 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 			outputFile{path: filepath.Join(dir, "InRelease"), data: signed.Clear},
 		)
 
-		summaries = append(summaries, SuiteSummary{
-			Suite:         suite,
-			Packages:      info.packages,
-			Architectures: slices.Sorted(maps.Keys(info.archs)),
-		})
+		summaries = append(summaries, summary)
 	}
 
 	if err := publishFiles(ctx, workdir, publicFiles, "created"); err != nil {
@@ -621,6 +628,36 @@ func renderArchRelease(key indexKey, cfg repoConfig) []byte {
 	fmt.Fprintf(&sb, "Acquire-By-Hash: yes\nComponent: %s\nArchitecture: %s\n", key.component, key.arch)
 
 	return []byte(sb.String())
+}
+
+// releaseCurrent reports whether the published suite files can stay as they
+// are: the published Release differs from release only in its Date line, and
+// Release.gpg and InRelease still verify for it with publicKey. Keeping them
+// stops a no-op build from changing files a CDN would have to purge.
+func releaseCurrent(dir string, release, publicKey []byte) bool {
+	current, err := os.ReadFile(filepath.Join(dir, "Release"))
+	if err != nil || !bytes.Equal(withoutDate(current), withoutDate(release)) {
+		return false
+	}
+
+	detached, err := os.ReadFile(filepath.Join(dir, "Release.gpg"))
+	if err != nil {
+		return false
+	}
+
+	inRelease, err := os.ReadFile(filepath.Join(dir, "InRelease"))
+	if err != nil {
+		return false
+	}
+
+	return pgpsign.Verify(publicKey, current, pgpsign.Signed{Clear: inRelease, Detached: detached}) == nil
+}
+
+func withoutDate(release []byte) []byte {
+	lines := bytes.SplitAfter(release, []byte("\n"))
+	lines = slices.DeleteFunc(lines, func(line []byte) bool { return bytes.HasPrefix(line, []byte("Date: ")) })
+
+	return bytes.Join(lines, nil)
 }
 
 func renderRelease(suite string, cfg repoConfig, info *suiteInfo, now time.Time) []byte {

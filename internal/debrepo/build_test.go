@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.vitalvas.com/repomgr/internal/debfile"
 	"go.vitalvas.com/repomgr/internal/debtest"
+	"go.vitalvas.com/repomgr/internal/pgpsign"
 )
 
 var buildTime = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
@@ -810,7 +811,7 @@ func TestBuildLogs(t *testing.T) {
 		assert.Less(t, strings.Index(out, "bar_1.0"), strings.Index(out, "foo_1.0"))
 	})
 
-	t.Run("unchanged rebuild only rewrites signed release files", func(t *testing.T) {
+	t.Run("unchanged rebuild rewrites nothing", func(t *testing.T) {
 		workdir := newWorkdir(t)
 		addPkg(t, workdir, "s", "c", ctl("foo", "1.0", ""))
 
@@ -821,6 +822,11 @@ func TestBuildLogs(t *testing.T) {
 		past := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 		require.NoError(t, os.Chtimes(packages, past, past))
 
+		before := map[string]string{}
+		for _, name := range []string{"Release", "Release.gpg", "InRelease"} {
+			before[name] = readPublic(t, workdir, "dists", "s", name)
+		}
+
 		logs := captureLogs(t)
 
 		_, err = Build(t.Context(), workdir, buildTime.Add(time.Hour))
@@ -829,14 +835,71 @@ func TestBuildLogs(t *testing.T) {
 		out := logs.String()
 		assert.NotContains(t, out, "parsed")
 		assert.NotContains(t, out, "added by-hash")
-		assert.Equal(t, 3, strings.Count(out, "msg=updated"), out)
-		assert.Contains(t, out, "msg=updated path=public/dists/s/Release\n")
-		assert.Contains(t, out, "msg=updated path=public/dists/s/Release.gpg\n")
-		assert.Contains(t, out, "msg=updated path=public/dists/s/InRelease\n")
+		assert.NotContains(t, out, "msg=updated", out)
+
+		for name, data := range before {
+			assert.Equal(t, data, readPublic(t, workdir, "dists", "s", name), name)
+		}
 
 		info, err := os.Stat(packages)
 		require.NoError(t, err)
 		assert.True(t, info.ModTime().Equal(past))
+	})
+
+	t.Run("changes re-sign with a new date", func(t *testing.T) {
+		later := buildTime.Add(time.Hour)
+
+		cases := map[string]func(t *testing.T, workdir string){
+			"package added": func(t *testing.T, workdir string) {
+				addPkg(t, workdir, "s", "c", ctl("bar", "1.0", ""))
+			},
+			"metadata changed": func(t *testing.T, workdir string) {
+				require.NoError(t, os.WriteFile(filepath.Join(workdir, "config", "repo.yaml"), []byte("origin: Example\n"), 0o644))
+			},
+			"InRelease missing": func(t *testing.T, workdir string) {
+				require.NoError(t, os.Remove(filepath.Join(workdir, "public", "dists", "s", "InRelease")))
+			},
+			"Release.gpg corrupt": func(t *testing.T, workdir string) {
+				require.NoError(t, os.WriteFile(filepath.Join(workdir, "public", "dists", "s", "Release.gpg"), []byte("garbage"), 0o644))
+			},
+			"signing key replaced": func(t *testing.T, workdir string) {
+				key, err := pgpsign.GenerateKey("New Signer", "")
+				require.NoError(t, err)
+				require.NoError(t, os.WriteFile(filepath.Join(workdir, "config", "signing.asc"), key.Private, 0o600))
+			},
+		}
+
+		for name, change := range cases {
+			t.Run(name, func(t *testing.T) {
+				workdir := newWorkdir(t)
+				addPkg(t, workdir, "s", "c", ctl("foo", "1.0", ""))
+
+				_, err := Build(t.Context(), workdir, buildTime)
+				require.NoError(t, err)
+
+				change(t, workdir)
+
+				logs := captureLogs(t)
+
+				_, err = Build(t.Context(), workdir, later)
+				require.NoError(t, err)
+
+				out := logs.String()
+				assert.Contains(t, out, "msg=updated path=public/dists/s/Release\n")
+				assert.Contains(t, out, "msg=updated path=public/dists/s/Release.gpg\n")
+				assert.Contains(t, out, "msg=updated path=public/dists/s/InRelease\n")
+
+				release := readPublic(t, workdir, "dists", "s", "Release")
+				assert.Contains(t, release, fmt.Sprintf("Date: %s\n", later.Format(time.RFC1123)))
+
+				public := []byte(readPublic(t, workdir, "key.gpg"))
+				signed := pgpsign.Signed{
+					Clear:    []byte(readPublic(t, workdir, "dists", "s", "InRelease")),
+					Detached: []byte(readPublic(t, workdir, "dists", "s", "Release.gpg")),
+				}
+				assert.NoError(t, pgpsign.Verify(public, []byte(release), signed))
+			})
+		}
 	})
 
 	t.Run("deleted pool file drops cache entry and stale suite", func(t *testing.T) {

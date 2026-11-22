@@ -155,7 +155,11 @@ that name are a conflict.
    rendered index.
 8. Replace the canonical `Packages`, `Packages.gz`, `Packages.zst`, and
    per-directory `Release` files with a temporary file and rename.
-9. Replace `Release` and `Release.gpg`, then `InRelease` last.
+9. Replace `Release` and `Release.gpg`, then `InRelease` last. A suite keeps
+   all three files, with their old `Date`, when the published `Release`
+   differs from the rendered one only in `Date` and both signatures verify for
+   it with the current public key. This happens in step 6, before signing, so
+   an unchanged suite isn't re-signed.
 10. Apply by-hash retention and remove the directories of suites, components,
     and architectures that no longer have packages.
 11. If any upload was rejected, return an error naming the count, so the
@@ -209,7 +213,7 @@ repository format allows: `Archive` (the same value as `Suite`), `Origin`, `Labe
 | `Codename` | The suite name given to `--suite` |
 | `Suite` | `suites.<name>.suite` from `config/repo.yaml`; the suite name when unset |
 | `Version` | `suites.<name>.version` from `config/repo.yaml`; omitted when unset |
-| `Date` | Build time in UTC, RFC 1123 format |
+| `Date` | Time of the build that last changed the suite, in UTC, RFC 1123 format |
 | `Acquire-By-Hash` | `yes` |
 | `Architectures` | Architectures present in the suite, plus `all` when the suite has `Architecture: all` packages |
 | `Components` | Components present in the suite |
@@ -327,9 +331,8 @@ rename. `add` writes the entry for the file it adds.
   - `updated` for each `dists/` file it writes.
   - `removed stale` for each directory it deletes.
 
-  `build` doesn't rewrite a `dists/` file whose content is unchanged.
-  `Release`, `Release.gpg`, and `InRelease` change on every build because of
-  `Date`. At the end, `build` logs one `built` line per suite with the package
+  `build` doesn't rewrite a `dists/` file whose content is unchanged, so a
+  build with no changes writes nothing and logs no `updated` lines. At the end, `build` logs one `built` line per suite with the package
   count and architectures.
 - Two commands running at the same time on one workdir aren't coordinated. The
   code marks this with a `ponytail:` comment.

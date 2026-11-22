@@ -65,6 +65,11 @@ architectures that no longer have packages. It fails without touching
 `dists/` if a pool file isn't at the path its control data gives, or if two
 files share a name but differ in content.
 
+`build` only writes files whose content changed. When nothing changed, it
+writes nothing, so you can run it from cron without touching your CDN. A
+suite's `Release` keeps its old `Date` until the suite's indexes, its metadata
+in `repo.yaml`, or the signing key change.
+
 `build` also restores `public/key.gpg` and `public/key.asc` from
 `config/signing.asc` when either file is missing or differs.
 

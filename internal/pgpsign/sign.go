@@ -16,7 +16,11 @@ type Signed struct {
 	Detached []byte
 }
 
-var errNoPrivateKey = errors.New("no private key found")
+var (
+	errNoPrivateKey   = errors.New("no private key found")
+	errNoClearsign    = errors.New("no clearsigned message found")
+	errClearPlaintext = errors.New("clearsigned text differs from message")
+)
 
 func readPrivateKey(privateKey []byte) (*openpgp.Entity, error) {
 	list, err := openpgp.ReadArmoredKeyRing(bytes.NewReader(privateKey))
@@ -46,6 +50,36 @@ func PublicKey(privateKey []byte) ([]byte, error) {
 	}
 
 	return pub.Bytes(), nil
+}
+
+// Verify checks that both signatures in signed are valid for message under the
+// binary public key, and that the clearsigned text is exactly message.
+func Verify(public, message []byte, signed Signed) error {
+	keyring, err := openpgp.ReadKeyRing(bytes.NewReader(public))
+	if err != nil {
+		return fmt.Errorf("read public key: %w", err)
+	}
+
+	_, err = openpgp.CheckArmoredDetachedSignature(keyring, bytes.NewReader(message), bytes.NewReader(signed.Detached), nil)
+	if err != nil {
+		return fmt.Errorf("verify detached signature: %w", err)
+	}
+
+	block, _ := clearsign.Decode(signed.Clear)
+	if block == nil {
+		return errNoClearsign
+	}
+
+	_, err = block.VerifySignature(keyring, nil)
+	if err != nil {
+		return fmt.Errorf("verify clearsigned message: %w", err)
+	}
+
+	if !bytes.Equal(block.Plaintext, message) {
+		return errClearPlaintext
+	}
+
+	return nil
 }
 
 // Sign signs message with SHA-512 because gpgv and sqv reject SHA-1.
