@@ -4,6 +4,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"go.vitalvas.com/repomgr/internal/cli"
 )
@@ -17,7 +19,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = p.Execute(context.Background())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	err = p.Execute(ctx)
+
+	stop()
+
 	if err != nil {
 		slog.Error("repomgr failed", "error", err)
 		os.Exit(1)

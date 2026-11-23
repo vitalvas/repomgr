@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +29,98 @@ func debBytes(t testing.TB, control string) []byte {
 	require.NoError(t, err)
 
 	return data
+}
+
+func TestMoveUploadSwappedForSymlink(t *testing.T) {
+	workdir := newWorkdir(t)
+	data := debBytes(t, ctl("foo", "1.0", ""))
+	file := uploadDeb(t, workdir, "stable/main/x.deb", data)
+	uploadDir := filepath.Join(workdir, "upload")
+
+	entries, err := os.ReadDir(filepath.Dir(file))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	outside := filepath.Join(t.TempDir(), "outside.deb")
+	require.NoError(t, os.WriteFile(outside, data, 0o600))
+	require.NoError(t, os.Remove(file))
+	require.NoError(t, os.Symlink(outside, file))
+
+	root, err := os.OpenRoot(uploadDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { root.Close() })
+
+	err = moveUpload(t.Context(), workdir, root, file, entries[0])
+	require.Error(t, err)
+
+	info, err := os.Stat(outside)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+	after, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, data, after)
+
+	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
+
+	link, err := os.Lstat(file)
+	require.NoError(t, err)
+	assert.NotZero(t, link.Mode()&os.ModeSymlink)
+}
+
+func TestMoveUploadParentSwappedForSymlink(t *testing.T) {
+	workdir := newWorkdir(t)
+	data := debBytes(t, ctl("foo", "1.0", ""))
+	file := uploadDeb(t, workdir, "stable/main/x.deb", data)
+	uploadDir := filepath.Join(workdir, "upload")
+	componentDir := filepath.Dir(file)
+
+	entries, err := os.ReadDir(componentDir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "x.deb")
+	require.NoError(t, os.WriteFile(outside, data, 0o600))
+	require.NoError(t, os.RemoveAll(componentDir))
+	require.NoError(t, os.Symlink(outsideDir, componentDir))
+
+	root, err := os.OpenRoot(uploadDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { root.Close() })
+
+	err = moveUpload(t.Context(), workdir, root, file, entries[0])
+	require.Error(t, err)
+
+	after, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, data, after)
+
+	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
+}
+
+func TestMoveUploadSwappedForFIFO(t *testing.T) {
+	workdir := newWorkdir(t)
+	file := uploadDeb(t, workdir, "stable/main/x.deb", debBytes(t, ctl("foo", "1.0", "")))
+	uploadDir := filepath.Join(workdir, "upload")
+
+	entries, err := os.ReadDir(filepath.Dir(file))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	require.NoError(t, os.Remove(file))
+	require.NoError(t, syscall.Mkfifo(file, 0o600))
+
+	root, err := os.OpenRoot(uploadDir)
+	require.NoError(t, err)
+	t.Cleanup(func() { root.Close() })
+
+	err = moveUpload(t.Context(), workdir, root, file, entries[0])
+	require.ErrorContains(t, err, "not a regular file")
+
+	_, err = os.Lstat(file)
+	require.NoError(t, err)
+	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
 }
 
 func TestBuildUploads(t *testing.T) {
@@ -134,6 +227,64 @@ func TestBuildUploads(t *testing.T) {
 		}
 
 		assert.False(t, strings.Contains(logs.String(), "upload"))
+	})
+
+	t.Run("symlink to the signing key is rejected and the key is untouched", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		key := filepath.Join(workdir, "config", "signing.asc")
+		require.NoError(t, os.Chmod(key, 0o600))
+		before, err := os.ReadFile(key)
+		require.NoError(t, err)
+
+		link := filepath.Join(workdir, "upload", "stable", "main", "x.deb")
+		require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+		require.NoError(t, os.Symlink(key, link))
+
+		_, err = Build(t.Context(), workdir, buildTime)
+		require.ErrorIs(t, err, ErrUploadRejected)
+
+		info, err := os.Stat(key)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+
+		after, err := os.ReadFile(key)
+		require.NoError(t, err)
+		assert.Equal(t, before, after)
+
+		assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
+
+		target, err := os.Readlink(link)
+		require.NoError(t, err)
+		assert.Equal(t, key, target)
+	})
+
+	t.Run("symlink to a valid deb is rejected", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		src := writeDeb(t, ctl("foo", "1.0", ""))
+		link := filepath.Join(workdir, "upload", "stable", "main", "foo.deb")
+		require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+		require.NoError(t, os.Symlink(src, link))
+
+		_, err := Build(t.Context(), workdir, buildTime)
+		require.ErrorIs(t, err, ErrUploadRejected)
+
+		_, err = os.Lstat(link)
+		require.NoError(t, err)
+		assert.FileExists(t, src)
+		assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
+	})
+
+	t.Run("no upload temp file is left in cache", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		uploadDeb(t, workdir, "stable/main/ok.deb", debBytes(t, ctl("foo", "1.0", "")))
+		uploadDeb(t, workdir, "stable/main/broken.deb", []byte("not a deb"))
+
+		_, err := Build(t.Context(), workdir, buildTime)
+		require.ErrorIs(t, err, ErrUploadRejected)
+
+		left, err := filepath.Glob(filepath.Join(workdir, "cache", ".upload-*.deb"))
+		require.NoError(t, err)
+		assert.Empty(t, left)
 	})
 
 	t.Run("upload path that is a file fails the build", func(t *testing.T) {

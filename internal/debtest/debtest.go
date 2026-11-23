@@ -49,8 +49,8 @@ type nopCloser struct{ io.Writer }
 
 func (nopCloser) Close() error { return nil }
 
-// archive returns an empty tar when control is empty, otherwise one with ./control.
-func archive(control, ext string) ([]byte, error) {
+// Compress returns data compressed for ext, which is "", ".gz", ".xz" or ".zst".
+func Compress(ext string, data []byte) ([]byte, error) {
 	var buf bytes.Buffer
 
 	var w io.WriteCloser
@@ -78,7 +78,22 @@ func archive(control, ext string) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported compression %q", ext)
 	}
 
-	tw := tar.NewWriter(w)
+	if _, err := w.Write(data); err != nil {
+		return nil, fmt.Errorf("compress: %w", err)
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, fmt.Errorf("close compressor: %w", err)
+	}
+
+	return buf.Bytes(), nil
+}
+
+// archive returns an empty tar when control is empty, otherwise one with ./control.
+func archive(control, ext string) ([]byte, error) {
+	var buf bytes.Buffer
+
+	tw := tar.NewWriter(&buf)
 
 	if control != "" {
 		hdr := &tar.Header{
@@ -101,9 +116,5 @@ func archive(control, ext string) ([]byte, error) {
 		return nil, fmt.Errorf("close tar: %w", err)
 	}
 
-	if err := w.Close(); err != nil {
-		return nil, fmt.Errorf("close compressor: %w", err)
-	}
-
-	return buf.Bytes(), nil
+	return Compress(ext, buf.Bytes())
 }

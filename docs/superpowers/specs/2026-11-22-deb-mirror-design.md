@@ -38,7 +38,22 @@ version, not only the newest.
 1. Fetch `<source-repo>/dists/<source-suite>/InRelease`. It must be a
    clearsigned message. With `--source-key`, verify the signature against that
    key and fail if it doesn't verify. Without it, read the cleartext and don't
-   check the signature.
+   check the signature. Then run three checks on the `Release` text, with or
+   without `--source-key`, before any index request:
+
+   - Suite: the `Suite` field must equal `--source-suite`. A `Codename` match
+     also passes, unless `Suite` starts with `<source-suite>-`. That case is a
+     pocket of the same codename, such as `noble-updates` served for `noble`.
+   - Freshness: `Date` is required and must not be more than 5 minutes ahead of
+     the current time. `Valid-Until`, when present, must not be in the past.
+     Both use RFC 1123 dates with a one or two digit day and a zone name or a
+     numeric offset.
+   - Rollback: `cache/mirror-state.json` maps each source repo URL, without
+     its `user:password@` part, and suite to the last accepted `Date`. An older `Date` is fatal, an equal or newer one
+     passes, and a missing file means no limit. A corrupt file is fatal.
+
+   After the indexes verify and before any package download, the command
+   stores the `Date` in that file. Deleting `cache/` resets the rollback check.
 2. Fail if the `Components` field doesn't list `--source-component`.
 3. Take the architectures from the `Architectures` field that repomgr supports
    (`all`, `amd64`, `arm64`, `armel`, `armhf`, `i386`) and ignore the rest. Fail
@@ -121,6 +136,12 @@ These errors stop the command before it downloads any package:
 - The `--source-key` file can't be read or holds no public key.
 - `InRelease` or an index returns an HTTP status other than 200.
 - `InRelease` isn't clearsigned, or its signature doesn't verify.
+- Neither `Suite` nor `Codename` equals `--source-suite`, or only `Codename`
+  matches and `Suite` is a pocket (`<source-suite>-...`) of it.
+- `Date` is missing, unparseable, or more than 5 minutes in the future.
+- `Valid-Until` is unparseable or in the past.
+- `Date` is older than the one stored in `cache/mirror-state.json`, or that
+  file is corrupt.
 - The component isn't listed in `Components`.
 - No supported architecture is listed in `Architectures`.
 - No supported index is listed, or a listed index's size or SHA256 doesn't match.
@@ -139,9 +160,31 @@ end returns `ErrMirrorFailed`, so the command exits with status 1.
 ## HTTP
 
 The command uses the standard library HTTP client, which honors `HTTPS_PROXY`
-and the related environment variables. There is no overall timeout because
-packages can be large. Requests send `Accept-Encoding: identity`, so the bytes
-that arrive match the sizes and hashes in `Release`.
+and the related environment variables. Requests send `Accept-Encoding:
+identity`, so the bytes that arrive match the sizes and hashes in `Release`.
+
+Every request has a 60-second stall timer. It starts before the request is
+sent and restarts on each body read that returns data. When it fires, it
+cancels the request, and the error reads `no data for 1m0s`. There is no
+overall timeout because packages can be large. `main` cancels the context on
+`SIGINT` and `SIGTERM`.
+
+The mirror bounds what it holds and writes:
+
+- `InRelease` is read up to 16 MiB, and a larger body is fatal.
+- An index whose `Release` size is over 256 MiB is fatal before it's requested.
+  Decompression stops past 256 MiB, which is also fatal.
+- Before each download, `statfs` on `cache/` must show twice the package
+  `Size` plus 1 GiB free. Otherwise the package fails and the run continues.
+
+The limits live in an unexported `MirrorOptions` field, which is zero outside
+tests and then takes the defaults, so tests can shrink them.
+
+`--source-repo` may carry credentials as `user:password@` or a token as the
+user name. The client sends them as Basic auth. `debrepo.StripUserinfo` removes
+the whole userinfo from every URL that goes into a log line, an error, or
+`cache/mirror-state.json`. Errors from the HTTP client drop its `*url.Error`
+wrapper, because that text repeats the URL with the user name.
 
 ## Logging
 
@@ -181,10 +224,29 @@ compression, and an `InRelease` signed with `pgpsign.Sign`. The tests cover:
 - With `--source-key`, a valid signature passes and a wrong key or edited text
   fails. Without it, a run with a wrongly signed `InRelease` still passes, and
   a body that isn't clearsigned fails.
+- Suite match on `Suite` only, on `Codename` only, and on neither.
+- The pocket rule: `noble-updates` with codename `noble` fails for `noble`,
+  while `noble`/`noble`, `stable`/`bookworm`, and
+  `stable-updates`/`bookworm-updates` pass.
+- `Date` missing, unparseable, 10 minutes ahead (fatal), and 1 minute ahead
+  (passes). `Valid-Until` in the past or unparseable is fatal, and in the
+  future passes. The tests inject the clock through `MirrorOptions.Now`.
+- Rollback: the first run stores the date, an equal date passes, an older date
+  is fatal and leaves the state, a newer date is stored, and a corrupt state
+  file is fatal.
 - Each fatal error in the list above.
 - Package size or SHA256 mismatch and a pool conflict fail only that package,
   and the run returns `ErrMirrorFailed`.
 - `--force` replaces a corrupted target file and still fails on a conflict in
   another suite.
+- With `user:password@` and with a token as the user name, every request
+  carries the credentials, while log lines, the state file key, HTTP status
+  errors, hash errors, and connection errors never contain them.
+- Limits: an `InRelease` over its cap, an index listed over its cap (never
+  requested), an index of exactly the cap, and `.gz` and `.zst` indexes that
+  decompress one byte over or exactly to the cap. A server that never answers
+  is fatal, a package body that stalls fails that package, and a slow body
+  that keeps sending passes. A package that would leave too little free space
+  fails without a request.
 - The CLI wires the flags, rejects a bad expression, and rejects a missing key
   file.

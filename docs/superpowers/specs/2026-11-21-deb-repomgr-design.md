@@ -91,6 +91,20 @@ The project uses a root `main.go` that holds only `main()`, plus these packages:
 `add` never trusts the input file name. It reads the control file inside the
 package and derives every path from it.
 
+The parser never unpacks `data.tar`. It reads at most 64 MiB of uncompressed
+`control.tar`, counting every entry and the data after the tar end, and the
+`control` file inside it may be at most 16 MiB. A package over either limit
+fails, so a small compressed archive can't make `add` or `build` do unbounded
+work.
+
+The xz decoder allocates the dictionary that each block header names before
+it decodes anything. So for `control.tar.xz`, the parser first reads the
+member into memory (at most 64 MiB) and walks its blocks in the order the
+decoder reads them, finding each block's end from the LZMA2 chunk sizes rather
+than the index. Every block must use a single LZMA2 filter with a dictionary of
+at most 64 MiB, the largest standard `xz` preset. The member must hold exactly
+one xz stream.
+
 | Item | Rule |
 | --- | --- |
 | Suite, component | `^[a-z0-9][a-z0-9_-]*$` |
@@ -178,10 +192,16 @@ an `upload` path that isn't a directory fails the build.
 - Each `.deb` goes through the same checks as `add` steps 2 to 5: suite and
   component names, package parsing and validation, pool path, and the
   pool-wide conflict check.
-- With no conflict, `build` sets the file to mode 0644 and renames it into its
-  pool path. `upload/` and `public/` must share a filesystem for the rename.
-  `build` writes no cache entry for it; step 3 parses the moved file, so the
-  indexes describe the bytes that actually landed in the pool.
+- `build` opens the upload once without following symlinks and requires a
+  regular file. A symlink is rejected. The open and the later delete go
+  through an `os.Root` on `upload/`, so a directory swapped for a symlink
+  after the walk can't reach a file outside `upload/`. The open is
+  non-blocking, so a file swapped for a FIFO is rejected instead of hanging
+  the build. `build` copies the open file to a private temp file in `cache/`
+  and runs `add` on that copy.
+- With no conflict, `add` writes the pool file with mode 0644 and updates the
+  cache. `build` then deletes the upload. `upload/` and `public/` need not
+  share a filesystem.
 - If the pool path already holds the same bytes, `build` deletes the upload.
 - Any failure leaves the file in `upload/` and counts it as rejected. When two
   uploads map to the same pool file name with different bytes, the first in

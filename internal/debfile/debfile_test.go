@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -232,6 +233,96 @@ func TestParseControlArchiveIntegrity(t *testing.T) {
 		control, err := Parse(bytes.NewReader(buildAr("debian-binary", "2.0\n", "control.tar.gz", ctrl)))
 		require.NoError(t, err)
 		assert.Equal(t, "Package: example\nDescription: example\n long", control.Raw)
+	})
+}
+
+// controlArchive returns a control tar for ext holding an ignored entry of
+// ignored zero bytes and ./control, followed by trailing zero bytes after the
+// tar end.
+func controlArchive(t testing.TB, ext string, ignored, trailing int) []byte {
+	t.Helper()
+
+	var buf bytes.Buffer
+
+	tw := tar.NewWriter(&buf)
+
+	entries := []struct {
+		name string
+		data []byte
+	}{
+		{"./ignored", make([]byte, ignored)},
+		{"./control", []byte("Package: x\n")},
+	}
+
+	for _, e := range entries {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: e.name, Mode: 0o644, Size: int64(len(e.data)), Typeflag: tar.TypeReg}))
+
+		_, err := tw.Write(e.data)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, tw.Close())
+	buf.Write(make([]byte, trailing))
+
+	data, err := debtest.Compress(ext, buf.Bytes())
+	require.NoError(t, err)
+
+	return data
+}
+
+// readArchive runs readControl on data as the member name, with the ar
+// padding byte after it.
+func readArchive(name string, data []byte, limit int64) (Control, error) {
+	return readControl(bytes.NewReader(append(slices.Clone(data), '\n')), arMember{name: name, size: int64(len(data))}, limit)
+}
+
+func TestControlArchiveLimit(t *testing.T) {
+	const limit int64 = 64 << 10
+
+	tests := map[string]struct {
+		ignored  int
+		trailing int
+		ok       bool
+	}{
+		"under the limit":           {ignored: 32 << 10, ok: true},
+		"large ignored entry":       {ignored: 1 << 20},
+		"large data after the tar":  {trailing: 1 << 20},
+		"limit hit inside an entry": {ignored: int(limit)},
+	}
+
+	for _, ext := range []string{"", ".gz", ".xz", ".zst"} {
+		name := fmt.Sprintf("control.tar%s", ext)
+
+		for desc, tc := range tests {
+			t.Run(fmt.Sprintf("%s %s", name, desc), func(t *testing.T) {
+				c, err := readArchive(name, controlArchive(t, ext, tc.ignored, tc.trailing), limit)
+				if tc.ok {
+					require.NoError(t, err)
+					assert.Equal(t, "x", c.Fields["package"])
+
+					return
+				}
+
+				require.ErrorContains(t, err, fmt.Sprintf("control archive %s exceeds %d bytes uncompressed", name, limit))
+			})
+		}
+	}
+
+	t.Run("exact limit passes and one byte less fails", func(t *testing.T) {
+		data := controlArchive(t, "", 0, 0)
+
+		_, err := readArchive(controlPlain, data, int64(len(data)))
+		require.NoError(t, err)
+
+		_, err = readArchive(controlPlain, data, int64(len(data)-1))
+		require.ErrorContains(t, err, "exceeds")
+	})
+
+	t.Run("parse applies the 64 MiB limit", func(t *testing.T) {
+		ctrl := controlArchive(t, "", int(maxControlArchiveSize), 0)
+
+		_, err := Parse(bytes.NewReader(buildAr("debian-binary", "2.0\n", controlPlain, ctrl)))
+		require.ErrorContains(t, err, "control archive control.tar exceeds 67108864 bytes uncompressed")
 	})
 }
 

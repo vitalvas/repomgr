@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp/clearsign"
 	"github.com/klauspost/compress/zstd"
@@ -39,6 +42,9 @@ type MirrorOptions struct {
 	// SourceKey is the upstream public key (armored or binary); empty skips the InRelease signature check.
 	SourceKey []byte
 
+	// Now is the clock for the Release freshness checks; zero means time.Now().
+	Now time.Time
+
 	// Force replaces a target pool file whose SHA256 differs from upstream.
 	Force bool
 
@@ -50,6 +56,50 @@ type MirrorOptions struct {
 	VersionExclude      string
 	Architecture        string
 	ArchitectureExclude string
+
+	// limits is zero outside tests, which means defaultMirrorLimits.
+	limits mirrorLimits
+}
+
+const (
+	// mirrorStallTimeout cancels a request that receives no data for this long,
+	// from connecting through the last body byte.
+	mirrorStallTimeout time.Duration = time.Minute
+	maxInReleaseSize   int64         = 16 << 20
+	// maxIndexSize caps a Packages index both as downloaded and decompressed.
+	maxIndexSize int64 = 256 << 20
+	// minFreeSpace is what a download must leave free on the workdir filesystem.
+	minFreeSpace uint64 = 1 << 30
+)
+
+type mirrorLimits struct {
+	stall   time.Duration
+	release int64
+	index   int64
+	reserve uint64
+}
+
+func defaultMirrorLimits() mirrorLimits {
+	return mirrorLimits{stall: mirrorStallTimeout, release: maxInReleaseSize, index: maxIndexSize, reserve: minFreeSpace}
+}
+
+// checkFreeSpace fails when a package of size bytes, held twice while it moves
+// from cache/ to the pool, would leave less than reserve bytes free in dir.
+func checkFreeSpace(dir string, size int64, reserve uint64) error {
+	var st syscall.Statfs_t
+
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return fmt.Errorf("statfs %s: %w", dir, err)
+	}
+
+	free := st.Bavail * uint64(st.Bsize)
+	need := 2 * uint64(size)
+
+	if free < reserve || free-reserve < need {
+		return fmt.Errorf("not enough free space: need %d bytes and %d spare, %d free", need, reserve, free)
+	}
+
+	return nil
 }
 
 type mirrorFilters struct {
@@ -161,6 +211,10 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 		return MirrorResult{}, err
 	}
 
+	if opts.limits == (mirrorLimits{}) {
+		opts.limits = defaultMirrorLimits()
+	}
+
 	repo, err := url.Parse(opts.SourceRepo)
 	if err != nil || repo.Hostname() == "" || (repo.Scheme != "http" && repo.Scheme != "https") || repo.Fragment != "" {
 		return MirrorResult{}, errors.New("source repository must be an HTTP or HTTPS base URL")
@@ -172,7 +226,12 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 
 	distBase := repoPath(repo, fmt.Sprintf("dists/%s", opts.SourceSuite))
 
-	entries, err := fetchEntries(ctx, distBase, opts.SourceComponent, opts.SourceKey)
+	entries, date, err := fetchEntries(ctx, workdir, distBase, opts)
+	if err != nil {
+		return MirrorResult{}, err
+	}
+
+	err = saveMirrorState(workdir, mirrorStateKey(opts), date)
 	if err != nil {
 		return MirrorResult{}, err
 	}
@@ -246,10 +305,87 @@ func repoPath(base *url.URL, name string) *url.URL {
 	return &u
 }
 
-func getOK(ctx context.Context, url string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// StripUserinfo returns rawURL without its user:password@ part, so the URL can
+// be logged, put in an error, or stored without credentials. The username goes
+// too, because it can be the token. A URL without userinfo comes back
+// unchanged; one that doesn't parse comes back empty.
+func StripUserinfo(rawURL string) string {
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("request %s: %w", url, err)
+		return ""
+	}
+
+	if u.User == nil {
+		return rawURL
+	}
+
+	u.User = nil
+
+	return u.String()
+}
+
+// urlCause drops the *url.Error wrapper, whose text repeats the request URL
+// with its username.
+func urlCause(err error) error {
+	var uerr *url.Error
+	if errors.As(err, &uerr) {
+		return uerr.Err
+	}
+
+	return err
+}
+
+// stallBody restarts the stall timer on every read that returns data and
+// reports a fired timer as stalled rather than as a canceled context.
+type stallBody struct {
+	io.ReadCloser
+	timer   *time.Timer
+	stall   time.Duration
+	cause   func() error
+	stalled error
+	cancel  context.CancelCauseFunc
+}
+
+func (b *stallBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.timer.Reset(b.stall)
+	}
+
+	if err != nil && errors.Is(b.cause(), b.stalled) {
+		err = b.stalled
+	}
+
+	return n, err
+}
+
+func (b *stallBody) Close() error {
+	b.timer.Stop()
+	err := b.ReadCloser.Close()
+	b.cancel(nil)
+
+	return err
+}
+
+// getOK returns the body of a 200 response. The request is canceled once it
+// receives no data for stall, so an upstream can't hold the run forever.
+func getOK(ctx context.Context, u *url.URL, stall time.Duration) (*http.Response, error) {
+	shown := StripUserinfo(u.String())
+	stalled := fmt.Errorf("no data for %s", stall)
+
+	ctx, cancel := context.WithCancelCause(ctx)
+	timer := time.AfterFunc(stall, func() { cancel(stalled) })
+
+	fail := func(err error) (*http.Response, error) {
+		timer.Stop()
+		cancel(nil)
+
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return fail(fmt.Errorf("request %s: %w", shown, urlCause(err)))
 	}
 
 	// Raw bytes keep the Release hash check valid for .gz and .zst indexes.
@@ -257,52 +393,71 @@ func getOK(ctx context.Context, url string) (*http.Response, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("get %s: %w", url, err)
+		if errors.Is(context.Cause(ctx), stalled) {
+			err = stalled
+		}
+
+		return fail(fmt.Errorf("get %s: %w", shown, urlCause(err)))
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
 
-		return nil, fmt.Errorf("get %s: %s", url, resp.Status)
+		return fail(fmt.Errorf("get %s: %s", shown, resp.Status))
+	}
+
+	resp.Body = &stallBody{
+		ReadCloser: resp.Body,
+		timer:      timer,
+		stall:      stall,
+		cause:      func() error { return context.Cause(ctx) },
+		stalled:    stalled,
+		cancel:     cancel,
 	}
 
 	return resp, nil
 }
 
-func getBytes(ctx context.Context, url string) ([]byte, error) {
-	resp, err := getOK(ctx, url)
+// getBytes reads a response of at most limit bytes.
+func getBytes(ctx context.Context, u *url.URL, stall time.Duration, limit int64) ([]byte, error) {
+	resp, err := getOK(ctx, u, stall)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", url, err)
+		return nil, fmt.Errorf("read %s: %w", StripUserinfo(u.String()), err)
+	}
+
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path.Base(u.Path), limit)
 	}
 
 	return data, nil
 }
 
 // fetchEntries reads InRelease and the listed Packages indexes for supported
-// architectures. It returns the packages deduplicated by Filename.
-func fetchEntries(ctx context.Context, distBase *url.URL, component string, sourceKey []byte) ([]mirrorEntry, error) {
-	body, err := getBytes(ctx, repoPath(distBase, "InRelease").String())
+// architectures. It returns the packages deduplicated by Filename and the
+// accepted Release date.
+func fetchEntries(ctx context.Context, workdir string, distBase *url.URL, opts MirrorOptions) ([]mirrorEntry, time.Time, error) {
+	body, err := getBytes(ctx, repoPath(distBase, "InRelease"), opts.limits.stall, opts.limits.release)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 
 	var plaintext []byte
 
-	if len(sourceKey) > 0 {
-		plaintext, err = pgpsign.VerifyClear(sourceKey, body)
+	if len(opts.SourceKey) > 0 {
+		plaintext, err = pgpsign.VerifyClear(opts.SourceKey, body)
 		if err != nil {
-			return nil, fmt.Errorf("verify InRelease: %w", err)
+			return nil, time.Time{}, fmt.Errorf("verify InRelease: %w", err)
 		}
 	} else {
 		block, _ := clearsign.Decode(body)
 		if block == nil {
-			return nil, errors.New("InRelease is not clearsigned")
+			return nil, time.Time{}, errors.New("InRelease is not clearsigned")
 		}
 
 		plaintext = block.Plaintext
@@ -310,11 +465,16 @@ func fetchEntries(ctx context.Context, distBase *url.URL, component string, sour
 
 	release, err := debfile.ParseControl(strings.TrimRight(string(plaintext), "\n"))
 	if err != nil {
-		return nil, fmt.Errorf("parse InRelease: %w", err)
+		return nil, time.Time{}, fmt.Errorf("parse InRelease: %w", err)
 	}
 
-	if !slices.Contains(strings.Fields(release.Fields["components"]), component) {
-		return nil, fmt.Errorf("source has no component %q", component)
+	date, err := checkRelease(workdir, opts, release.Fields)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	if !slices.Contains(strings.Fields(release.Fields["components"]), opts.SourceComponent) {
+		return nil, time.Time{}, fmt.Errorf("source has no component %q", opts.SourceComponent)
 	}
 
 	var archs []string
@@ -327,12 +487,12 @@ func fetchEntries(ctx context.Context, distBase *url.URL, component string, sour
 	}
 
 	if len(archs) == 0 {
-		return nil, errors.New("source has no supported architecture")
+		return nil, time.Time{}, errors.New("source has no supported architecture")
 	}
 
 	files, err := parseReleaseHashes(release.Fields["sha256"])
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 
 	var entries []mirrorEntry
@@ -342,11 +502,11 @@ func fetchEntries(ctx context.Context, distBase *url.URL, component string, sour
 	indexes := 0
 
 	for _, arch := range archs {
-		indexPath := fmt.Sprintf("%s/binary-%s/Packages", component, arch)
+		indexPath := fmt.Sprintf("%s/binary-%s/Packages", opts.SourceComponent, arch)
 
-		found, err := fetchIndex(ctx, distBase, indexPath, files)
+		found, err := fetchIndex(ctx, distBase, indexPath, files, opts.limits)
 		if err != nil {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 
 		if found == nil {
@@ -358,7 +518,7 @@ func fetchEntries(ctx context.Context, distBase *url.URL, component string, sour
 		for _, e := range found {
 			if previous, ok := seen[e.filename]; ok {
 				if previous.size != e.size || previous.sha256 != e.sha256 || checkIndexControl(previous.fields, e.fields) != nil {
-					return nil, fmt.Errorf("conflicting index entries for %s", e.filename)
+					return nil, time.Time{}, fmt.Errorf("conflicting index entries for %s", e.filename)
 				}
 
 				continue
@@ -370,10 +530,137 @@ func fetchEntries(ctx context.Context, distBase *url.URL, component string, sour
 	}
 
 	if indexes == 0 {
-		return nil, fmt.Errorf("source Release does not list a supported Packages index for %s", component)
+		return nil, time.Time{}, fmt.Errorf("source Release does not list a supported Packages index for %s", opts.SourceComponent)
 	}
 
-	return entries, nil
+	return entries, date, nil
+}
+
+const releaseClockSkew time.Duration = 5 * time.Minute
+
+// parseReleaseTime reads a Debian Release date, which is RFC 1123 with either a
+// zone name or a numeric offset.
+func parseReleaseTime(field, value string) (time.Time, error) {
+	for _, layout := range []string{"Mon, 2 Jan 2006 15:04:05 MST", "Mon, 2 Jan 2006 15:04:05 -0700"} {
+		t, err := time.Parse(layout, value)
+		if err == nil {
+			return t, nil
+		}
+	}
+
+	return time.Time{}, fmt.Errorf("InRelease has an invalid %s %q", field, value)
+}
+
+// checkRelease rejects a Release for another suite, a stale or future one, and
+// one older than the last accepted. It returns the Release date.
+func checkRelease(workdir string, opts MirrorOptions, fields map[string]string) (time.Time, error) {
+	if fields["suite"] != opts.SourceSuite {
+		if fields["codename"] != opts.SourceSuite {
+			return time.Time{}, fmt.Errorf("InRelease is for suite %q and codename %q, not %q", fields["suite"], fields["codename"], opts.SourceSuite)
+		}
+
+		// Pockets such as noble-updates share the codename of the release they extend.
+		if strings.HasPrefix(fields["suite"], fmt.Sprintf("%s-", opts.SourceSuite)) {
+			return time.Time{}, fmt.Errorf("InRelease is for suite %q (codename %q), a pocket of %q", fields["suite"], fields["codename"], opts.SourceSuite)
+		}
+	}
+
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	if fields["date"] == "" {
+		return time.Time{}, errors.New("InRelease has no Date")
+	}
+
+	date, err := parseReleaseTime("Date", fields["date"])
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	if date.After(now.Add(releaseClockSkew)) {
+		return time.Time{}, fmt.Errorf("InRelease Date %s is in the future", fields["date"])
+	}
+
+	if fields["valid-until"] != "" {
+		until, err := parseReleaseTime("Valid-Until", fields["valid-until"])
+		if err != nil {
+			return time.Time{}, err
+		}
+
+		if until.Before(now) {
+			return time.Time{}, fmt.Errorf("InRelease expired at %s", fields["valid-until"])
+		}
+	}
+
+	state, err := loadMirrorState(workdir)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	stored, ok := state[mirrorStateKey(opts)]
+	if !ok {
+		return date, nil
+	}
+
+	last, err := time.Parse(time.RFC3339, stored)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid date %q in cache/mirror-state.json: %w", stored, err)
+	}
+
+	if date.Before(last) {
+		return time.Time{}, fmt.Errorf("InRelease Date %s is older than the last accepted %s",
+			date.UTC().Format(time.RFC3339), last.UTC().Format(time.RFC3339))
+	}
+
+	return date, nil
+}
+
+func mirrorStateKey(opts MirrorOptions) string {
+	return fmt.Sprintf("%s %s", StripUserinfo(opts.SourceRepo), opts.SourceSuite)
+}
+
+// loadMirrorState maps a source repository and suite to the last accepted
+// Release date. A missing file is empty; a corrupt one is an error so the
+// rollback protection is never silently reset.
+func loadMirrorState(workdir string) (map[string]string, error) {
+	file := filepath.Join(workdir, "cache", "mirror-state.json")
+
+	data, err := os.ReadFile(file)
+	if errors.Is(err, os.ErrNotExist) {
+		return map[string]string{}, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", file, err)
+	}
+
+	var state map[string]string
+
+	err = json.Unmarshal(data, &state)
+	if err != nil || state == nil {
+		return nil, fmt.Errorf("corrupt %s (%v): delete it to reset the rollback protection", file, err)
+	}
+
+	return state, nil
+}
+
+// ponytail: concurrent mirror runs on one workdir are not coordinated and can lower the stored date, a lock file is the upgrade path.
+func saveMirrorState(workdir, key string, date time.Time) error {
+	state, err := loadMirrorState(workdir)
+	if err != nil {
+		return err
+	}
+
+	state[key] = date.UTC().Format(time.RFC3339)
+
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("encode mirror state: %w", err)
+	}
+
+	return writeAtomic(filepath.Join(workdir, "cache", "mirror-state.json"), bytes.NewReader(data), 0o644, nil)
 }
 
 func parseReleaseHashes(field string) (map[string]releaseFile, error) {
@@ -409,7 +696,7 @@ func parseReleaseHashes(field string) (map[string]releaseFile, error) {
 	return files, nil
 }
 
-func fetchIndex(ctx context.Context, distBase *url.URL, indexPath string, files map[string]releaseFile) ([]mirrorEntry, error) {
+func fetchIndex(ctx context.Context, distBase *url.URL, indexPath string, files map[string]releaseFile, limits mirrorLimits) ([]mirrorEntry, error) {
 	var (
 		suffix string
 		want   releaseFile
@@ -429,7 +716,11 @@ func fetchIndex(ctx context.Context, distBase *url.URL, indexPath string, files 
 
 	indexPath += suffix
 
-	resp, err := getOK(ctx, repoPath(distBase, indexPath).String())
+	if want.size > limits.index {
+		return nil, fmt.Errorf("%s: Release lists %d bytes, over the %d byte limit", indexPath, want.size, limits.index)
+	}
+
+	resp, err := getOK(ctx, repoPath(distBase, indexPath), limits.stall)
 	if err != nil {
 		return nil, err
 	}
@@ -447,7 +738,7 @@ func fetchIndex(ctx context.Context, distBase *url.URL, indexPath string, files 
 		return nil, fmt.Errorf("%s: SHA256 mismatch with Release", indexPath)
 	}
 
-	index, err := decompressIndex(data.Bytes(), suffix)
+	index, err := decompressIndex(data.Bytes(), suffix, limits.index)
 	if err != nil {
 		return nil, fmt.Errorf("decompress %s: %w", indexPath, err)
 	}
@@ -485,7 +776,10 @@ func parseIndex(text []byte, indexPath string) ([]mirrorEntry, error) {
 	return entries, nil
 }
 
-func decompressIndex(data []byte, suffix string) ([]byte, error) {
+// decompressIndex returns the index text, failing once it passes limit bytes.
+func decompressIndex(data []byte, suffix string, limit int64) ([]byte, error) {
+	var src io.Reader
+
 	switch suffix {
 	case ".gz":
 		zr, err := gzip.NewReader(bytes.NewReader(data))
@@ -494,7 +788,7 @@ func decompressIndex(data []byte, suffix string) ([]byte, error) {
 		}
 		defer zr.Close()
 
-		return io.ReadAll(zr)
+		src = zr
 	case ".zst":
 		zr, err := zstd.NewReader(bytes.NewReader(data), zstd.WithDecoderConcurrency(1), zstd.WithDecoderMaxMemory(128<<20))
 		if err != nil {
@@ -502,10 +796,21 @@ func decompressIndex(data []byte, suffix string) ([]byte, error) {
 		}
 		defer zr.Close()
 
-		return io.ReadAll(zr)
+		src = zr
+	default:
+		return data, nil
 	}
 
-	return data, nil
+	text, err := io.ReadAll(io.LimitReader(src, limit+1))
+	if err != nil {
+		return nil, err
+	}
+
+	if int64(len(text)) > limit {
+		return nil, fmt.Errorf("index exceeds %d bytes", limit)
+	}
+
+	return text, nil
 }
 
 func parseIndexEntry(paragraph string) (mirrorEntry, error) {
@@ -570,13 +875,18 @@ func mirrorPackage(ctx context.Context, workdir string, repo *url.URL, opts Mirr
 		return AddResult{}, fmt.Errorf("create %s: %w", cacheDir, err)
 	}
 
+	err = checkFreeSpace(cacheDir, e.size, opts.limits.reserve)
+	if err != nil {
+		return AddResult{}, fmt.Errorf("mirror %s: %w", rel, err)
+	}
+
 	tmp, err := os.CreateTemp(cacheDir, ".mirror-*.deb")
 	if err != nil {
 		return AddResult{}, fmt.Errorf("create temp file: %w", err)
 	}
 	defer os.Remove(tmp.Name())
 
-	err = download(ctx, repoPath(repo, e.filename).String(), tmp, e)
+	err = download(ctx, repoPath(repo, e.filename), tmp, e, opts.limits.stall)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -602,9 +912,9 @@ func checkExistingControl(target string, expected map[string]string) error {
 	return checkIndexControl(control.Fields, expected)
 }
 
-// download streams url into tmp, closes it, and checks size and SHA256.
-func download(ctx context.Context, url string, tmp *os.File, e mirrorEntry) error {
-	resp, err := getOK(ctx, url)
+// download streams u into tmp, closes it, and checks size and SHA256.
+func download(ctx context.Context, u *url.URL, tmp *os.File, e mirrorEntry, stall time.Duration) error {
+	resp, err := getOK(ctx, u, stall)
 	if err != nil {
 		tmp.Close()
 
@@ -618,11 +928,11 @@ func download(ctx context.Context, url string, tmp *os.File, e mirrorEntry) erro
 
 	err = errors.Join(copyErr, tmp.Close())
 	if err != nil {
-		return fmt.Errorf("download %s: %w", url, err)
+		return fmt.Errorf("download %s: %w", StripUserinfo(u.String()), err)
 	}
 
 	if hex.EncodeToString(h.Sum(nil)) != e.sha256 {
-		return fmt.Errorf("download %s: SHA256 mismatch with index", url)
+		return fmt.Errorf("download %s: SHA256 mismatch with index", StripUserinfo(u.String()))
 	}
 
 	return nil

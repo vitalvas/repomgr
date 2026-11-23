@@ -2,6 +2,7 @@ package debfile
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"errors"
 	"fmt"
@@ -29,6 +30,9 @@ const (
 	controlZstd    string = "control.tar.zst"
 	binaryVersion  string = "2."
 	maxControlSize int64  = 16 << 20
+	// maxControlArchiveSize caps the uncompressed bytes read from the whole
+	// control archive, so a small compressed member can't cost unbounded work.
+	maxControlArchiveSize int64 = 64 << 20
 )
 
 type Control struct {
@@ -65,7 +69,7 @@ func Parse(r io.Reader) (Control, error) {
 		return Control{}, fmt.Errorf("expected control archive, found %s", m.name)
 	}
 
-	return readControl(r, m)
+	return readControl(r, m, maxControlArchiveSize)
 }
 
 func nextRequiredMember(r io.Reader) (arMember, error) {
@@ -148,7 +152,7 @@ func checkBinary(r io.Reader, m arMember) error {
 	return nil
 }
 
-func readControl(r io.Reader, m arMember) (Control, error) {
+func readControl(r io.Reader, m arMember, limit int64) (Control, error) {
 	member := &io.LimitedReader{R: r, N: m.size}
 
 	var src io.Reader
@@ -166,7 +170,21 @@ func readControl(r io.Reader, m arMember) (Control, error) {
 
 		src = zr
 	case controlXz:
-		xr, err := xz.NewReader(member)
+		if m.size > limit {
+			return Control{}, fmt.Errorf("control archive %s exceeds %d bytes", m.name, limit)
+		}
+
+		data, err := io.ReadAll(member)
+		if err != nil {
+			return Control{}, fmt.Errorf("read member %s: %w", m.name, err)
+		}
+
+		if err := checkXZ(data); err != nil {
+			return Control{}, fmt.Errorf("check xz of %s: %w", m.name, err)
+		}
+
+		// One stream only, so checkXZ has seen every block the decoder reads.
+		xr, err := xz.ReaderConfig{SingleStream: true}.NewReader(bytes.NewReader(data))
 		if err != nil {
 			return Control{}, fmt.Errorf("open xz of %s: %w", m.name, err)
 		}
@@ -185,14 +203,25 @@ func readControl(r io.Reader, m arMember) (Control, error) {
 		return Control{}, fmt.Errorf("unsupported control archive %s", m.name)
 	}
 
-	control, err := readControlTar(src, m.name)
-	if err != nil {
-		return Control{}, err
+	// One extra byte tells an archive of exactly limit bytes from a longer one.
+	budget := &io.LimitedReader{R: src, N: limit + 1}
+
+	control, err := readControlTar(budget, m.name)
+	if err == nil {
+		// Reading to the end verifies the compression trailer.
+		if _, copyErr := io.Copy(io.Discard, budget); copyErr != nil {
+			err = fmt.Errorf("finish %s: %w", m.name, copyErr)
+		}
 	}
 
-	// Reading to the end verifies the compression trailer.
-	if _, err := io.Copy(io.Discard, src); err != nil {
-		return Control{}, fmt.Errorf("finish %s: %w", m.name, err)
+	// Checked first, because hitting the limit inside an entry surfaces as a
+	// truncated tar error.
+	if budget.N == 0 {
+		return Control{}, fmt.Errorf("control archive %s exceeds %d bytes uncompressed", m.name, limit)
+	}
+
+	if err != nil {
+		return Control{}, err
 	}
 
 	if member.N != 0 {

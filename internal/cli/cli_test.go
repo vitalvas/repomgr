@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -147,7 +148,7 @@ func fakeUpstream(t *testing.T, corrupt bool) (string, *atomic.Int32, []byte) {
 	require.NoError(t, err)
 
 	index := []byte(fmt.Sprintf("Package: foo\nVersion: 1.0\nArchitecture: amd64\nFilename: pool/foo.deb\nSize: %d\nSHA256: %s\n", len(deb), hexSum(deb)))
-	release := fmt.Sprintf("Suite: stable\nArchitectures: amd64\nComponents: main\nSHA256:\n %s %d main/binary-amd64/Packages\n", hexSum(index), len(index))
+	release := fmt.Sprintf("Suite: stable\nCodename: bookworm\nDate: %s\nArchitectures: amd64\nComponents: main\nSHA256:\n %s %d main/binary-amd64/Packages\n", time.Now().UTC().Format(time.RFC1123), hexSum(index), len(index))
 
 	key, err := pgpsign.GenerateKey("Upstream", "up@example.com")
 	require.NoError(t, err)
@@ -197,6 +198,15 @@ func TestDebMirror(t *testing.T) {
 		assert.FileExists(t, filepath.Join(dir, "public", "pool", "mirror", "main", "f", "foo", "amd64", "foo_1.0_amd64.deb"))
 		assert.Contains(t, logs.String(), "msg=mirrored")
 		assert.Contains(t, logs.String(), "added=1 replaced=0 unchanged=0 failed=0")
+	})
+
+	t.Run("credentials in the source URL are not logged", func(t *testing.T) {
+		withCreds := strings.Replace(upstream, "://", "://user:s3cret@", 1)
+		logs := captureLogs(t)
+
+		require.NoError(t, run(t, mirrorArgs(t, withCreds)...))
+		assert.Contains(t, logs.String(), fmt.Sprintf("msg=mirrored source=%s ", upstream))
+		assert.NotContains(t, logs.String(), "s3cret")
 	})
 
 	t.Run("positional argument fails", func(t *testing.T) {

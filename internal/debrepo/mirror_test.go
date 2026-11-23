@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp/clearsign"
 	"github.com/klauspost/compress/zstd"
@@ -27,12 +29,17 @@ import (
 const (
 	upInRelease string = "dists/stable/InRelease"
 	upAmd64     string = "dists/stable/main/binary-amd64/Packages"
+
+	releaseDate string = "Tue, 27 Oct 2026 00:59:22 UTC"
 )
 
+var testNow = time.Date(2026, time.November, 1, 12, 0, 0, 0, time.UTC)
+
 type fakeRepo struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	hits map[string]int
+	srv   *httptest.Server
+	mu    sync.Mutex
+	hits  map[string]int
+	users map[string]int
 }
 
 func (f *fakeRepo) count(suffix string) int {
@@ -53,10 +60,13 @@ func (f *fakeRepo) count(suffix string) int {
 func serveFiles(t testing.TB, files map[string][]byte) *fakeRepo {
 	t.Helper()
 
-	f := &fakeRepo{hits: map[string]int{}}
+	f := &fakeRepo{hits: map[string]int{}, users: map[string]int{}}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, pass, _ := r.BasicAuth()
+
 		f.mu.Lock()
 		f.hits[r.URL.Path]++
+		f.users[fmt.Sprintf("%s:%s", user, pass)]++
 		f.mu.Unlock()
 
 		data, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
@@ -102,7 +112,7 @@ func signedRelease(t testing.TB, archs, comps string, listed map[string][]byte) 
 
 	var sb strings.Builder
 
-	fmt.Fprintf(&sb, "Suite: stable\nArchitectures: %s\nComponents: %s\nSHA256:\n", archs, comps)
+	fmt.Fprintf(&sb, "Suite: stable\nCodename: bookworm\nDate: %s\nArchitectures: %s\nComponents: %s\nSHA256:\n", releaseDate, archs, comps)
 
 	for _, p := range paths {
 		fmt.Fprintf(&sb, " %s %d %s\n", hexSum(listed[p]), len(listed[p]), p)
@@ -146,6 +156,7 @@ func mirrorOpts(f *fakeRepo) MirrorOptions {
 		SourceComponent: "main",
 		TargetSuite:     "mirror",
 		TargetComponent: "main",
+		Now:             testNow,
 	}
 }
 
@@ -592,6 +603,181 @@ func TestCopySized(t *testing.T) {
 	assert.Equal(t, len("trailing bytes"), src.Len())
 }
 
+// serveHandler serves files like serveFiles but lets handle take over a request
+// by returning true.
+func serveHandler(t *testing.T, files map[string][]byte, handle func(w http.ResponseWriter, r *http.Request) bool) *fakeRepo {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handle(w, r) {
+			return
+		}
+
+		data, ok := files[strings.TrimPrefix(r.URL.Path, "/")]
+		if !ok {
+			http.NotFound(w, r)
+
+			return
+		}
+
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(srv.Close)
+
+	return &fakeRepo{srv: srv}
+}
+
+func TestMirrorLimits(t *testing.T) {
+	fooDeb := debBytes(t, archCtl("foo", "amd64"))
+	entry := packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb)
+	debs := map[string][]byte{"pool/f/foo.deb": fooDeb}
+
+	limited := func(repo *fakeRepo, set func(l *mirrorLimits)) MirrorOptions {
+		opts := mirrorOpts(repo)
+		opts.limits = defaultMirrorLimits()
+		set(&opts.limits)
+
+		return opts
+	}
+
+	t.Run("InRelease over the cap", func(t *testing.T) {
+		repo := serveFiles(t, upstreamFiles(t, "amd64", "main", map[string]string{"main/binary-amd64/Packages": entry}, debs))
+
+		_, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.release = 100 }))
+		require.ErrorContains(t, err, "InRelease exceeds 100 bytes")
+		assert.Zero(t, repo.count("/Packages"))
+	})
+
+	t.Run("index listed over the cap is never requested", func(t *testing.T) {
+		repo := serveFiles(t, upstreamFiles(t, "amd64", "main", map[string]string{"main/binary-amd64/Packages": entry}, debs))
+
+		_, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.index = 10 }))
+		require.ErrorContains(t, err, fmt.Sprintf("main/binary-amd64/Packages: Release lists %d bytes, over the 10 byte limit", len(entry)))
+		assert.Zero(t, repo.count("/Packages"))
+	})
+
+	t.Run("index of exactly the cap passes", func(t *testing.T) {
+		repo := serveFiles(t, upstreamFiles(t, "amd64", "main", map[string]string{"main/binary-amd64/Packages": entry}, debs))
+
+		res, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.index = int64(len(entry)) }))
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Added: 1}, res)
+	})
+
+	t.Run("index decompressing over the cap", func(t *testing.T) {
+		// Blank lines only separate paragraphs, so the padded index stays valid.
+		padded := []byte(fmt.Sprintf("%s%s", entry, strings.Repeat("\n", 1<<20)))
+
+		var gzBuf bytes.Buffer
+
+		gw := gzip.NewWriter(&gzBuf)
+		_, err := gw.Write(padded)
+		require.NoError(t, err)
+		require.NoError(t, gw.Close())
+
+		zw, err := zstd.NewWriter(nil)
+		require.NoError(t, err)
+
+		for suffix, data := range map[string][]byte{".gz": gzBuf.Bytes(), ".zst": zw.EncodeAll(padded, nil)} {
+			t.Run(suffix, func(t *testing.T) {
+				index := fmt.Sprintf("main/binary-amd64/Packages%s", suffix)
+				content := map[string][]byte{index: data}
+				files := map[string][]byte{upInRelease: signedRelease(t, "amd64", "main", content), "pool/f/foo.deb": fooDeb}
+				files[fmt.Sprintf("dists/stable/%s", index)] = data
+				repo := serveFiles(t, files)
+
+				limit := int64(len(padded) - 1)
+				require.Less(t, int64(len(data)), limit)
+
+				_, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.index = limit }))
+				require.ErrorContains(t, err, fmt.Sprintf("decompress %s: index exceeds %d bytes", index, limit))
+
+				res, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.index = limit + 1 }))
+				require.NoError(t, err)
+				assert.Equal(t, MirrorResult{Added: 1}, res)
+			})
+		}
+	})
+
+	stallFiles := upstreamFiles(t, "amd64", "main", map[string]string{"main/binary-amd64/Packages": entry}, debs)
+
+	t.Run("server that never answers stops the run", func(t *testing.T) {
+		repo := serveHandler(t, stallFiles, func(_ http.ResponseWriter, r *http.Request) bool {
+			<-r.Context().Done()
+
+			return true
+		})
+
+		_, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.stall = 100 * time.Millisecond }))
+		require.ErrorContains(t, err, fmt.Sprintf("get %s/dists/stable/InRelease: no data for 100ms", repo.srv.URL))
+	})
+
+	t.Run("body that stalls fails the package", func(t *testing.T) {
+		repo := serveHandler(t, stallFiles, func(w http.ResponseWriter, r *http.Request) bool {
+			if !strings.HasSuffix(r.URL.Path, ".deb") {
+				return false
+			}
+
+			_, _ = w.Write(fooDeb[:10])
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+
+			return true
+		})
+		logs := captureLogs(t)
+		workdir := newWorkdir(t)
+
+		res, err := Mirror(t.Context(), workdir, limited(repo, func(l *mirrorLimits) { l.stall = 100 * time.Millisecond }))
+		require.ErrorIs(t, err, ErrMirrorFailed)
+		assert.Equal(t, MirrorResult{Failed: 1}, res)
+		assert.Contains(t, logs.String(), "no data for 100ms")
+		assert.NoFileExists(t, filepath.Join(workdir, "public", poolFoo))
+	})
+
+	t.Run("slow body that keeps sending passes", func(t *testing.T) {
+		repo := serveHandler(t, stallFiles, func(w http.ResponseWriter, r *http.Request) bool {
+			if !strings.HasSuffix(r.URL.Path, ".deb") {
+				return false
+			}
+
+			// Ten chunks 50ms apart take longer than the stall timeout in total.
+			for chunk := range slices.Chunk(fooDeb, len(fooDeb)/10+1) {
+				_, _ = w.Write(chunk)
+				w.(http.Flusher).Flush()
+				time.Sleep(50 * time.Millisecond)
+			}
+
+			return true
+		})
+
+		res, err := Mirror(t.Context(), newWorkdir(t), limited(repo, func(l *mirrorLimits) { l.stall = 300 * time.Millisecond }))
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Added: 1}, res)
+	})
+
+	t.Run("package that would leave too little free space fails", func(t *testing.T) {
+		repo := serveFiles(t, stallFiles)
+		logs := captureLogs(t)
+		workdir := newWorkdir(t)
+
+		res, err := Mirror(t.Context(), workdir, limited(repo, func(l *mirrorLimits) { l.reserve = 1 << 62 }))
+		require.ErrorIs(t, err, ErrMirrorFailed)
+		assert.Equal(t, MirrorResult{Failed: 1}, res)
+		assert.Contains(t, logs.String(), "not enough free space")
+		assert.Zero(t, repo.count(".deb"))
+		assert.NoFileExists(t, filepath.Join(workdir, "public", poolFoo))
+	})
+}
+
+func TestCheckFreeSpace(t *testing.T) {
+	dir := t.TempDir()
+
+	require.NoError(t, checkFreeSpace(dir, 1, 0))
+	require.ErrorContains(t, checkFreeSpace(dir, math.MaxInt64, 0), "not enough free space")
+	require.ErrorContains(t, checkFreeSpace(dir, 0, math.MaxUint64), "not enough free space")
+	require.ErrorContains(t, checkFreeSpace(filepath.Join(dir, "missing"), 1, 0), "statfs")
+}
+
 func TestMirrorIndexCompression(t *testing.T) {
 	fooDeb := debBytes(t, archCtl("foo", "amd64"))
 	index := []byte(packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb))
@@ -748,7 +934,7 @@ func TestMirrorSourceKey(t *testing.T) {
 	})
 
 	edited := maps.Clone(files)
-	edited[upInRelease] = bytes.Replace(files[upInRelease], []byte("Suite: stable"), []byte("Suite: edited"), 1)
+	edited[upInRelease] = bytes.Replace(files[upInRelease], []byte("Codename: bookworm"), []byte("Codename: edited"), 1)
 
 	t.Run("empty key accepts any signature", func(t *testing.T) {
 		for name, served := range map[string]map[string][]byte{"valid": files, "broken signature": edited} {
@@ -919,7 +1105,9 @@ func TestMirrorFieldNameCase(t *testing.T) {
 
 			// A whitespace-only line and a run of blank lines both separate paragraphs.
 			index := fmt.Sprintf("%s\n \t\n%s\n\n\n\n%s\n", entry("foo", foo), entry("bar", bar), entry("baz", baz))
-			release := fmt.Sprintf("Suite: stable\n%s: amd64\n%s: main\n%s:\n", change("Architectures"), change("Components"), change("SHA256"))
+			release := fmt.Sprintf("%s: stable\n%s: bookworm\n%s: %s\n%s: amd64\n%s: main\n%s:\n",
+				change("Suite"), change("Codename"), change("Date"), releaseDate,
+				change("Architectures"), change("Components"), change("SHA256"))
 			release += fmt.Sprintf(" %s %d main/binary-amd64/Packages\n", hexSum([]byte(index)), len(index))
 
 			signed, err := pgpsign.Sign(key.Private, []byte(release))
@@ -936,6 +1124,355 @@ func TestMirrorFieldNameCase(t *testing.T) {
 			res, err := Mirror(t.Context(), newWorkdir(t), mirrorOpts(repo))
 			require.NoError(t, err)
 			assert.Equal(t, MirrorResult{Added: 3}, res)
+		})
+	}
+}
+
+// resignRelease replaces the InRelease in files with edit applied to its signed text.
+func resignRelease(t *testing.T, files map[string][]byte, edit func(string) string) {
+	t.Helper()
+
+	block, _ := clearsign.Decode(files[upInRelease])
+	require.NotNil(t, block)
+
+	key, err := upstreamKey()
+	require.NoError(t, err)
+
+	signed, err := pgpsign.Sign(key.Private, []byte(edit(string(block.Plaintext))))
+	require.NoError(t, err)
+
+	files[upInRelease] = signed.Clear
+}
+
+func replaceDate(date string) func(string) string {
+	return func(s string) string { return strings.Replace(s, releaseDate, date, 1) }
+}
+
+func TestMirrorReleaseChecks(t *testing.T) {
+	fooDeb := debBytes(t, archCtl("foo", "amd64"))
+	base := upstreamFiles(t, "amd64", "main", map[string]string{
+		"main/binary-amd64/Packages": packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb),
+	}, map[string][]byte{"pool/f/foo.deb": fooDeb})
+
+	const (
+		future10m string = "Sun, 01 Nov 2026 12:10:00 UTC"
+		future1m  string = "Sun, 01 Nov 2026 12:01:00 UTC"
+		offsetUTC string = "Tue, 27 Oct 2026 02:59:22 +0200"
+	)
+
+	validUntil := func(value string) func(string) string {
+		return func(s string) string {
+			return strings.Replace(s, "Date:", fmt.Sprintf("Valid-Until: %s\nDate:", value), 1)
+		}
+	}
+
+	tests := []struct {
+		name string
+		edit func(string) string
+		want string
+	}{
+		{"suite and codename mismatch", func(s string) string {
+			return strings.Replace(strings.Replace(s, "Suite: stable", "Suite: testing", 1), "bookworm", "trixie", 1)
+		}, `InRelease is for suite "testing" and codename "trixie", not "stable"`},
+		{"only codename matches", func(s string) string {
+			return strings.Replace(strings.Replace(s, "Suite: stable", "Suite: testing", 1), "bookworm", "stable", 1)
+		}, ""},
+		{"only suite matches", func(s string) string { return s }, ""},
+		{"date missing", func(s string) string { return strings.Replace(s, fmt.Sprintf("Date: %s\n", releaseDate), "", 1) }, "has no Date"},
+		{"date unparseable", replaceDate("yesterday"), "invalid Date"},
+		{"date with unpadded day", replaceDate("Wed, 7 Oct 2026 00:59:22 UTC"), ""},
+		{"date with padded day", replaceDate("Wed, 07 Oct 2026 00:59:22 UTC"), ""},
+		{"date with +0000 offset", replaceDate("Wed, 07 Oct 2026 00:59:22 +0000"), ""},
+		{"date 10 minutes ahead", replaceDate(future10m), "future"},
+		{"date 1 minute ahead", replaceDate(future1m), ""},
+		{"date with numeric offset", replaceDate(offsetUTC), ""},
+		{"valid-until in the past", validUntil("Fri, 30 Oct 2026 00:00:00 UTC"), "expired"},
+		{"valid-until in the future", validUntil("Tue, 10 Nov 2026 00:00:00 UTC"), ""},
+		{"valid-until unparseable", validUntil("soon"), "invalid Valid-Until"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := maps.Clone(base)
+			resignRelease(t, files, tt.edit)
+
+			repo := serveFiles(t, files)
+
+			res, err := Mirror(t.Context(), newWorkdir(t), mirrorOpts(repo))
+			if tt.want == "" {
+				require.NoError(t, err)
+				assert.Equal(t, MirrorResult{Added: 1}, res)
+
+				return
+			}
+
+			require.ErrorContains(t, err, tt.want)
+			assert.Zero(t, repo.count("Packages"))
+			assert.Zero(t, repo.count(".deb"))
+		})
+	}
+
+	t.Run("pocket rule", func(t *testing.T) {
+		tests := []struct {
+			name, suite, codename, requested, want string
+		}{
+			{"pocket of the requested codename", "noble-updates", "noble", "noble", `InRelease is for suite "noble-updates" (codename "noble"), a pocket of "noble"`},
+			{"suite and codename equal", "noble", "noble", "noble", ""},
+			{"codename request with a distinct suite", "stable", "bookworm", "bookworm", ""},
+			{"pocket requested by its own name", "stable-updates", "bookworm-updates", "bookworm-updates", ""},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				signed := maps.Clone(base)
+				resignRelease(t, signed, func(s string) string {
+					s = strings.Replace(s, "Suite: stable", fmt.Sprintf("Suite: %s", tt.suite), 1)
+
+					return strings.Replace(s, "Codename: bookworm", fmt.Sprintf("Codename: %s", tt.codename), 1)
+				})
+
+				files := map[string][]byte{}
+				for name, data := range signed {
+					files[strings.Replace(name, "dists/stable/", fmt.Sprintf("dists/%s/", tt.requested), 1)] = data
+				}
+
+				repo := serveFiles(t, files)
+				opts := mirrorOpts(repo)
+				opts.SourceSuite = tt.requested
+				workdir := newWorkdir(t)
+
+				_, err := Mirror(t.Context(), workdir, opts)
+				if tt.want == "" {
+					require.NoError(t, err)
+
+					return
+				}
+
+				require.ErrorContains(t, err, tt.want)
+				assert.Zero(t, repo.count("Packages"))
+				assert.Zero(t, repo.count(".deb"))
+				assert.NoFileExists(t, filepath.Join(workdir, "cache", "mirror-state.json"))
+			})
+		}
+	})
+
+	t.Run("checks apply with a source key", func(t *testing.T) {
+		key, err := upstreamKey()
+		require.NoError(t, err)
+
+		files := maps.Clone(base)
+		resignRelease(t, files, replaceDate(future10m))
+
+		repo := serveFiles(t, files)
+		opts := mirrorOpts(repo)
+		opts.SourceKey = key.Public
+
+		_, err = Mirror(t.Context(), newWorkdir(t), opts)
+		require.ErrorContains(t, err, "future")
+		assert.Zero(t, repo.count("Packages"))
+		assert.Zero(t, repo.count(".deb"))
+	})
+
+	// Without the time.Now fallback a zero Now is year 1, which makes every Date a future one.
+	t.Run("zero Now uses the current time", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			offset time.Duration
+			want   string
+		}{
+			"a minute ago is accepted": {-time.Minute, ""},
+			"an hour ahead is fatal":   {time.Hour, "future"},
+		} {
+			t.Run(name, func(t *testing.T) {
+				files := maps.Clone(base)
+				resignRelease(t, files, replaceDate(time.Now().UTC().Add(tc.offset).Format(time.RFC1123)))
+
+				opts := mirrorOpts(serveFiles(t, files))
+				opts.Now = time.Time{}
+
+				_, err := Mirror(t.Context(), newWorkdir(t), opts)
+				if tc.want == "" {
+					require.NoError(t, err)
+
+					return
+				}
+
+				require.ErrorContains(t, err, tc.want)
+			})
+		}
+	})
+}
+
+func TestMirrorRollback(t *testing.T) {
+	fooDeb := debBytes(t, archCtl("foo", "amd64"))
+	files := upstreamFiles(t, "amd64", "main", map[string]string{
+		"main/binary-amd64/Packages": packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb),
+	}, map[string][]byte{"pool/f/foo.deb": fooDeb})
+	base := maps.Clone(files)
+
+	const (
+		older string = "Mon, 26 Oct 2026 00:59:22 UTC"
+		newer string = "Wed, 28 Oct 2026 00:59:22 UTC"
+	)
+
+	workdir := newWorkdir(t)
+	repo := serveFiles(t, files)
+	opts := mirrorOpts(repo)
+	state := filepath.Join(workdir, "cache", "mirror-state.json")
+	key := fmt.Sprintf("%s stable", repo.srv.URL)
+
+	// The handler reads files on each request, so swapping the InRelease changes what upstream serves.
+	serve := func(date string) {
+		changed := maps.Clone(base)
+		resignRelease(t, changed, replaceDate(date))
+		files[upInRelease] = changed[upInRelease]
+	}
+
+	readState := func(t *testing.T) string {
+		t.Helper()
+
+		data, err := os.ReadFile(state)
+		require.NoError(t, err)
+
+		return string(data)
+	}
+
+	t.Run("first run stores the date", func(t *testing.T) {
+		_, err := Mirror(t.Context(), workdir, opts)
+		require.NoError(t, err)
+		assert.JSONEq(t, fmt.Sprintf(`{%q: "2026-10-27T00:59:22Z"}`, key), readState(t))
+	})
+
+	t.Run("same date is accepted", func(t *testing.T) {
+		_, err := Mirror(t.Context(), workdir, opts)
+		require.NoError(t, err)
+		assert.JSONEq(t, fmt.Sprintf(`{%q: "2026-10-27T00:59:22Z"}`, key), readState(t))
+	})
+
+	t.Run("older date is fatal and leaves the state", func(t *testing.T) {
+		serve(older)
+
+		debs := repo.count(".deb")
+		indexes := repo.count("Packages")
+
+		_, err := Mirror(t.Context(), workdir, opts)
+		require.ErrorContains(t, err, "2026-10-26T00:59:22Z")
+		require.ErrorContains(t, err, "2026-10-27T00:59:22Z")
+		assert.Equal(t, debs, repo.count(".deb"))
+		assert.Equal(t, indexes, repo.count("Packages"))
+		assert.JSONEq(t, fmt.Sprintf(`{%q: "2026-10-27T00:59:22Z"}`, key), readState(t))
+	})
+
+	t.Run("newer date is accepted and stored", func(t *testing.T) {
+		serve(newer)
+
+		_, err := Mirror(t.Context(), workdir, opts)
+		require.NoError(t, err)
+		assert.JSONEq(t, fmt.Sprintf(`{%q: "2026-10-28T00:59:22Z"}`, key), readState(t))
+	})
+
+	t.Run("corrupt state is fatal", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(state, []byte("{not json"), 0o644))
+
+		debs := repo.count(".deb")
+		indexes := repo.count("Packages")
+
+		_, err := Mirror(t.Context(), workdir, opts)
+		require.ErrorContains(t, err, "mirror-state.json")
+		assert.Equal(t, debs, repo.count(".deb"))
+		assert.Equal(t, indexes, repo.count("Packages"))
+		assert.Equal(t, "{not json", readState(t))
+	})
+
+	t.Run("an unparseable stored date is fatal", func(t *testing.T) {
+		fresh := newWorkdir(t)
+		other := serveFiles(t, base)
+		stored := fmt.Sprintf(`{%q: "garbage"}`, fmt.Sprintf("%s stable", other.srv.URL))
+
+		require.NoError(t, os.MkdirAll(filepath.Join(fresh, "cache"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(fresh, "cache", "mirror-state.json"), []byte(stored), 0o644))
+
+		_, err := Mirror(t.Context(), fresh, mirrorOpts(other))
+		require.ErrorContains(t, err, "invalid date")
+		assert.Zero(t, other.count("Packages"))
+	})
+
+	t.Run("a failed run does not store the date", func(t *testing.T) {
+		fresh := newWorkdir(t)
+		broken := maps.Clone(base)
+		broken[upAmd64] = []byte("tampered")
+
+		_, err := Mirror(t.Context(), fresh, mirrorOpts(serveFiles(t, broken)))
+		require.Error(t, err)
+		assert.NoFileExists(t, filepath.Join(fresh, "cache", "mirror-state.json"))
+	})
+}
+
+func TestStripUserinfo(t *testing.T) {
+	tests := map[string]string{
+		"https://host/a//b/":            "https://host/a//b/",
+		"https://user:s3cret@host/a/":   "https://host/a/",
+		"https://s3cret@host:8443/a/":   "https://host:8443/a/",
+		"https://@host/":                "https://host/",
+		"https://user:s3cret@host/%zz/": "",
+	}
+
+	for in, want := range tests {
+		t.Run(in, func(t *testing.T) {
+			assert.Equal(t, want, StripUserinfo(in))
+		})
+	}
+}
+
+func TestMirrorCredentials(t *testing.T) {
+	fooDeb := debBytes(t, archCtl("foo", "amd64"))
+	barDeb := debBytes(t, archCtl("bar", "amd64"))
+	bazDeb := debBytes(t, archCtl("baz", "amd64"))
+	index := strings.Join([]string{
+		packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb),
+		packagesEntry(archCtl("bar", "amd64"), "pool/b/bar.deb", barDeb),
+		strings.Replace(packagesEntry(archCtl("baz", "amd64"), "pool/z/baz.deb", bazDeb), hexSum(bazDeb), hexSum([]byte("nope")), 1),
+	}, "\n\n")
+	// bar.deb is listed but not served, and baz.deb fails its hash check.
+	files := upstreamFiles(t, "amd64", "main", map[string]string{"main/binary-amd64/Packages": index},
+		map[string][]byte{"pool/f/foo.deb": fooDeb, "pool/z/baz.deb": bazDeb})
+
+	tests := map[string]struct {
+		userinfo string
+		auth     string
+	}{
+		"user and password": {userinfo: "user:s3cret", auth: "user:s3cret"},
+		"token as user":     {userinfo: "s3cret", auth: "s3cret:"},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			workdir := newWorkdir(t)
+			repo := serveFiles(t, files)
+			opts := mirrorOpts(repo)
+			opts.SourceRepo = strings.Replace(repo.srv.URL, "://", fmt.Sprintf("://%s@", tt.userinfo), 1)
+			logs := captureLogs(t)
+
+			res, err := Mirror(t.Context(), workdir, opts)
+			require.ErrorIs(t, err, ErrMirrorFailed)
+			assert.Equal(t, MirrorResult{Added: 1, Failed: 2}, res)
+			repo.mu.Lock()
+			assert.Equal(t, map[string]int{tt.auth: 5}, repo.users)
+			repo.mu.Unlock()
+
+			assert.Contains(t, logs.String(), fmt.Sprintf("%s/pool/b/bar.deb", repo.srv.URL))
+			assert.Contains(t, logs.String(), fmt.Sprintf("%s/pool/z/baz.deb", repo.srv.URL))
+			assert.NotContains(t, logs.String(), "s3cret")
+
+			state, err := os.ReadFile(filepath.Join(workdir, "cache", "mirror-state.json"))
+			require.NoError(t, err)
+			assert.JSONEq(t, fmt.Sprintf(`{%q: "2026-10-27T00:59:22Z"}`, fmt.Sprintf("%s stable", repo.srv.URL)), string(state))
+
+			repo.srv.Close()
+
+			_, err = Mirror(t.Context(), workdir, opts)
+			require.ErrorContains(t, err, fmt.Sprintf("get %s/dists/stable/InRelease: ", repo.srv.URL))
+			assert.NotContains(t, err.Error(), "s3cret")
+			assert.NotContains(t, err.Error(), "user")
 		})
 	}
 }

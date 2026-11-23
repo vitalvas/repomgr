@@ -39,6 +39,11 @@ pool/<suite>/<component>/<prefix>/<name>/<Architecture>/<Package>_<Version>_<Arc
 version in the file name drops any epoch. Supported architectures are `all`,
 `amd64`, `arm64`, `armel`, `armhf`, and `i386`.
 
+A package whose `control.tar` unpacks to more than 64 MiB, or whose `control`
+file is over 16 MiB, fails. A `control.tar.xz` must be one xz stream whose
+blocks use LZMA2 with a dictionary of at most 64 MiB, which every standard
+`xz` preset meets.
+
 Adding the same bytes again does nothing. Adding different bytes under a file
 name that already exists in any suite or component fails. You can add the same
 package to several suites; each suite gets its own copy.
@@ -75,6 +80,8 @@ in `repo.yaml`, or the signing key change.
 
 `build` caches parsed packages in `cache/index.json` and only re-reads files
 whose size or modification time changed. You can delete `cache/` at any time.
+It also resets the `deb-mirror` rollback state (see "Mirror an upstream
+repository").
 
 ### Upload inbox
 
@@ -89,10 +96,11 @@ repomgr deb --workdir /srv/repo build
 Before it scans the pool, `build` checks every `*.deb` directly inside an
 `upload/<suite>/<component>/` directory the same way `add` does. Then:
 
-- A package with no conflict is moved into its pool path and lands in the
-  indexes of the same build.
+- A package with no conflict is copied into its pool path and then deleted from
+  `upload/`. It lands in the indexes of the same build.
 - A package whose exact bytes are already in the pool is deleted from
   `upload/`.
+- A symlink in `upload/` is rejected and stays in place.
 - A package that fails a check stays in `upload/` and gets an error line. This
   covers a conflict with the pool, an invalid package, a bad suite or component
   name, or a `.deb` at any other depth. `build` still publishes everything else,
@@ -101,8 +109,7 @@ Before it scans the pool, `build` checks every `*.deb` directly inside an
 `build` ignores files that don't end in `.deb`, and files and directories whose
 names start with a dot. Upload to a temporary name such as `.ikev2-hub.deb` or
 `ikev2-hub.deb.part`, then rename it once the copy is complete, so `build`
-never reads a half-written package. Keep `upload/` on the same filesystem as
-`public/`, because the move is a rename.
+never reads a half-written package.
 
 ### Mirror an upstream repository
 
@@ -126,6 +133,24 @@ listed for the component. It checks each index against the size and SHA256 in
 index. Then it adds the package to `--target-suite` and `--target-component`
 the same way `add` does.
 It doesn't build indexes, so run `build` after your mirror runs.
+
+Before it requests any index, it runs three checks on `InRelease`, whether or
+not you set `--source-key`:
+
+- The `Suite` field must equal `--source-suite`. A `Codename` match also
+  passes, unless `Suite` starts with `<source-suite>-`. That case is a pocket
+  of the same codename, such as `noble-updates` served for `noble`, and it
+  fails.
+- `Date` must be present and no more than 5 minutes in the future. When
+  `Valid-Until` is present, it must not be in the past.
+- `Date` must not be older than the last one accepted for this source repo and
+  suite. An equal or newer date passes.
+
+`cache/mirror-state.json` holds that last accepted date per source repo and
+suite, keyed by the URL as you give it without any `user:password@` part. A
+corrupt file stops the run.
+Deleting `cache/` resets the rollback protection, and the next run trusts any
+validly signed, unexpired `Release`.
 
 The mirror only adds. It never deletes local packages, even when upstream drops
 them. It copies every matching version and skips downloading packages already
@@ -151,6 +176,11 @@ with an epoch such as `1:3006.0` doesn't match `3006.*`. Field names in the
 upstream `InRelease` and `Packages`, and in package control files, are matched
 case-insensitively, as in deb822.
 
+An upstream that needs a login can take credentials in the URL, as in
+`https://user:token@host/path/`. `deb-mirror` sends them with every request but
+removes the whole `user:password@` part from every URL it logs, puts in an
+error, or stores, because the user name can be the token too.
+
 `--source-key <file>` takes the upstream public key, armored or binary. With
 it, `deb-mirror` verifies the `InRelease` signature and stops if it doesn't
 match. Without it, the signature isn't checked.
@@ -163,6 +193,23 @@ fails.
 
 A package that fails to download, verify, or add gets an error line, and the
 rest of the run continues. The command then exits with status 1.
+
+These limits keep an upstream from stalling the run or exhausting memory or
+disk:
+
+- A request that receives no data for 60 seconds fails. This covers
+  connecting, waiting for the response, and every pause in the body, so a
+  large package on a working link still finishes.
+- `InRelease` can be at most 16 MiB. A `Packages` index can be at most 256 MiB,
+  both as listed in `Release` and after decompression. Going over either limit
+  stops the run.
+- A package fails if downloading it would leave less than 1 GiB free on the
+  filesystem that holds `cache/`. The check counts twice the package size,
+  because the file sits in `cache/` while it's copied into the pool.
+
+An upstream that sends a byte just often enough to beat the 60-second limit
+can still keep a run going. To cap the total time, run the command under a
+limit such as `timeout 2h`. `SIGINT` and `SIGTERM` stop the command cleanly.
 
 ## Workdir layout
 

@@ -131,7 +131,7 @@ func mirror(ctx context.Context, _ *xflags.Command, cfg *mirrorConfig, args []st
 		ArchitectureExclude: cfg.ArchitectureExclude,
 	})
 	if err == nil || errors.Is(err, debrepo.ErrMirrorFailed) {
-		slog.InfoContext(ctx, "mirrored", "source", cfg.SourceRepo, "suite", cfg.TargetSuite, "component", cfg.TargetComponent,
+		slog.InfoContext(ctx, "mirrored", "source", debrepo.StripUserinfo(cfg.SourceRepo), "suite", cfg.TargetSuite, "component", cfg.TargetComponent,
 			"added", r.Added, "replaced", r.Replaced, "unchanged", r.Unchanged, "failed", r.Failed)
 	}
 
