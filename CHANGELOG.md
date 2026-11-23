@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/vitalvas/repomgr/compare/v0.5.0...v0.6.0) (2026-11-23)
+
+
+### Features
+
+* add deb-mirror command and case-insensitive deb822 fields ([6b26ea5](https://github.com/vitalvas/repomgr/commit/6b26ea54d76da6916e96b5619255c26227c6604c))
+
+
+### Bug Fixes
+
+* harden deb-mirror index checks and keep source URL paths verbatim ([878b9ca](https://github.com/vitalvas/repomgr/commit/878b9ca22d3c24fd75dfd9b873915db2f8ea71d5))
+* harden mirror, deb parser, and upload inbox ([b26f93b](https://github.com/vitalvas/repomgr/commit/b26f93b36a303cefdba9149787910a08884e1543))
+
 ## [0.5.0](https://github.com/vitalvas/repomgr/compare/v0.4.0...v0.5.0) (2026-11-22)
 
 
