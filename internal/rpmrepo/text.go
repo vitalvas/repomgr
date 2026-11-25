@@ -14,7 +14,7 @@ const depField string = "%s entry %q"
 
 var errNotText = errors.New("is not valid UTF-8 text")
 
-// isControl is the reference rpm-md writer's forbidden control byte test.
+// isControl is the reference writer's forbidden control byte test.
 func isControl(b byte) bool {
 	return b < 32 && b != '\t' && b != '\n' && b != '\r'
 }
@@ -51,7 +51,7 @@ func looseUTF8(s string) bool {
 	return true
 }
 
-// latin1ToUTF8 is the reference rpm-md writer's cr_latin1_to_utf8.
+// latin1ToUTF8 is the reference writer's cr_latin1_to_utf8.
 func latin1ToUTF8(s string) string {
 	out := make([]byte, 0, 2*len(s))
 
@@ -71,7 +71,7 @@ func latin1ToUTF8(s string) string {
 	return string(out)
 }
 
-// textValue returns s as the reference rpm-md writer writes it, converting a
+// textValue returns s as the reference writer writes it, converting a
 // value that fails the loose UTF-8 check from Latin-1. It refuses what is then
 // still not strict UTF-8 or holds U+FFFE or U+FFFF.
 func textValue(s string) (string, error) {
@@ -118,7 +118,7 @@ func (c *textConv) control(s, format string, args ...any) {
 }
 
 // checkText refuses, before anything is written, a package the reference
-// rpm-md writer refuses for a control byte, or one with a text value that
+// writer refuses for a control byte, or one with a text value that
 // textValue refuses.
 func checkText(p rpmfile.Package) error {
 	var c textConv

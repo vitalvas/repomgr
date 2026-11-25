@@ -179,7 +179,7 @@ func compareLibc(a, b string) int {
 }
 
 // buildDeps builds the eight output lists of p in the order and with the
-// filters of the reference rpm-md writer.
+// filters of the reference writer.
 func buildDeps(p rpmfile.Package) depLists {
 	var l depLists
 

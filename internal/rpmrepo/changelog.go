@@ -6,7 +6,7 @@ import (
 	"go.vitalvas.com/repomgr/internal/rpmfile"
 )
 
-// changelogLimit is the reference rpm-md writer's default changelog limit.
+// changelogLimit is the reference writer's default changelog limit.
 const changelogLimit int = 10
 
 // trimAuthor drops trailing spaces but never the first byte.
@@ -19,7 +19,7 @@ func trimAuthor(s string) string {
 	return s[:end]
 }
 
-// keptChangelog returns the changelog entries the reference rpm-md writer
+// keptChangelog returns the changelog entries the reference writer
 // keeps, with its output dates, in output order: the first entries in header
 // order up to the limit, with the equal-time fix-up, written in reverse.
 func keptChangelog(entries []rpmfile.ChangelogEntry) []xmlChangelog {
