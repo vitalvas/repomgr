@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/vitalvas/repomgr/compare/v0.6.0...v0.7.0) (2026-11-25)
+
+
+### Features
+
+* add rpm repository management with init, add, and build ([b4caa74](https://github.com/vitalvas/repomgr/commit/b4caa74e5b7ab8559307e3ffadcad5281a746321))
+* split readme into deb and rpm docs and drop design specs ([b72dc39](https://github.com/vitalvas/repomgr/commit/b72dc39f008d02c074a2f28933f022be40934410))
+
+
+### Bug Fixes
+
+* validate RPM headers and publish repository metadata safely ([7928731](https://github.com/vitalvas/repomgr/commit/792873124ad629f8ab51c286e9de41564596a40d))
+
 ## [0.6.0](https://github.com/vitalvas/repomgr/compare/v0.5.0...v0.6.0) (2026-11-23)
 
 
