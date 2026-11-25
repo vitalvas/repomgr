@@ -494,6 +494,95 @@ func TestMirrorForce(t *testing.T) {
 	})
 }
 
+func TestMirrorCache(t *testing.T) {
+	fooDeb := debBytes(t, archCtl("foo", "amd64"))
+	files := upstreamFiles(t, "amd64", "main", map[string]string{
+		"main/binary-amd64/Packages": packagesEntry(archCtl("foo", "amd64"), "pool/f/foo.deb", fooDeb),
+	}, map[string][]byte{"pool/f/foo.deb": fooDeb})
+
+	// overwrite replaces the mirrored file with junk of the same size and sets
+	// its modification time to mtime.
+	overwrite := func(t *testing.T, workdir string, mtime time.Time) string {
+		t.Helper()
+
+		target := filepath.Join(workdir, "public", poolFoo)
+		require.NoError(t, os.WriteFile(target, bytes.Repeat([]byte{'x'}, len(fooDeb)), 0o644))
+		require.NoError(t, os.Chtimes(target, mtime, mtime))
+
+		return target
+	}
+
+	mirrored := func(t *testing.T) (string, *fakeRepo, time.Time) {
+		t.Helper()
+
+		workdir := newWorkdir(t)
+		repo := serveFiles(t, files)
+
+		res, err := Mirror(t.Context(), workdir, mirrorOpts(repo))
+		require.NoError(t, err)
+		require.Equal(t, MirrorResult{Added: 1}, res)
+
+		info, err := os.Stat(filepath.Join(workdir, "public", poolFoo))
+		require.NoError(t, err)
+
+		return workdir, repo, info.ModTime()
+	}
+
+	t.Run("a cache entry matching size and mtime skips reading the file", func(t *testing.T) {
+		workdir, repo, mtime := mirrored(t)
+		target := overwrite(t, workdir, mtime)
+
+		res, err := Mirror(t.Context(), workdir, mirrorOpts(repo))
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Unchanged: 1}, res)
+		assert.Equal(t, 1, repo.count(".deb"))
+
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Equal(t, bytes.Repeat([]byte{'x'}, len(fooDeb)), got)
+	})
+
+	t.Run("a different mtime reads the file", func(t *testing.T) {
+		workdir, repo, mtime := mirrored(t)
+		overwrite(t, workdir, mtime.Add(time.Second))
+
+		res, err := Mirror(t.Context(), workdir, mirrorOpts(repo))
+		require.ErrorIs(t, err, ErrMirrorFailed)
+		assert.Equal(t, MirrorResult{Failed: 1}, res)
+	})
+
+	t.Run("a cache entry with another SHA256 reads the file", func(t *testing.T) {
+		workdir, repo, _ := mirrored(t)
+
+		cache, err := repofs.LoadCache[cacheEntry](workdir)
+		require.NoError(t, err)
+
+		entry := cache[poolFoo]
+		entry.SHA256 = strings.Repeat("0", 64)
+		cache[poolFoo] = entry
+		require.NoError(t, repofs.SaveCache(workdir, cache))
+
+		res, err := Mirror(t.Context(), workdir, mirrorOpts(repo))
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Unchanged: 1}, res)
+	})
+
+	t.Run("force always reads the file", func(t *testing.T) {
+		workdir, repo, mtime := mirrored(t)
+		target := overwrite(t, workdir, mtime)
+		opts := mirrorOpts(repo)
+		opts.Force = true
+
+		res, err := Mirror(t.Context(), workdir, opts)
+		require.NoError(t, err)
+		assert.Equal(t, MirrorResult{Replaced: 1}, res)
+
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Equal(t, fooDeb, got)
+	})
+}
+
 func TestMirrorIndexValidation(t *testing.T) {
 	control := archCtl("foo", "amd64")
 	deb := debBytes(t, control)

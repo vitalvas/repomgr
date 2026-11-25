@@ -242,6 +242,13 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 		return MirrorResult{}, err
 	}
 
+	cache, err := repofs.LoadCache[cacheEntry](workdir)
+	if err != nil {
+		return MirrorResult{}, err
+	}
+
+	run := mirrorRun{workdir: workdir, repo: repo, opts: opts, cache: cache}
+
 	var res MirrorResult
 
 	for _, e := range entries {
@@ -253,7 +260,7 @@ func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResu
 			continue
 		}
 
-		add, err := mirrorPackage(ctx, workdir, repo, opts, e)
+		add, err := run.mirrorPackage(ctx, e)
 		if err != nil {
 			if ctx.Err() != nil {
 				return res, ctx.Err()
@@ -846,13 +853,47 @@ func parseIndexEntry(paragraph string) (mirrorEntry, error) {
 	return mirrorEntry{filename: filename, size: size, sha256: strings.ToLower(f["sha256"]), fields: f}, nil
 }
 
-func mirrorPackage(ctx context.Context, workdir string, repo *url.URL, opts MirrorOptions, e mirrorEntry) (AddResult, error) {
+// mirrorRun holds what every package of one mirror run shares. cache is the
+// build cache as loaded at the start of the run.
+type mirrorRun struct {
+	workdir string
+	repo    *url.URL
+	opts    MirrorOptions
+	cache   map[string]cacheEntry
+}
+
+// cachedUnchanged reports whether the build cache already vouches for the pool
+// file at rel: same size and mtime as on disk, and the SHA256, size, and
+// control fields the index lists. The file itself is not read.
+func (m mirrorRun) cachedUnchanged(rel, target string, e mirrorEntry) bool {
+	entry, ok := m.cache[rel]
+	if !ok {
+		return false
+	}
+
+	info, err := os.Lstat(target)
+	if err != nil || !info.Mode().IsRegular() || !entry.matches(info) {
+		return false
+	}
+
+	return entry.SHA256 == e.sha256 && entry.Size == e.size && checkIndexControl(entry.Fields, e.fields) == nil
+}
+
+func (m mirrorRun) mirrorPackage(ctx context.Context, e mirrorEntry) (AddResult, error) {
+	workdir, repo, opts := m.workdir, m.repo, m.opts
+
 	rel, err := poolPath(opts.TargetSuite, opts.TargetComponent, e.fields)
 	if err != nil {
 		return AddResult{}, err
 	}
 
 	target := filepath.Join(workdir, "public", filepath.FromSlash(rel))
+
+	// --force exists to repair a damaged pool file, so it always reads the file.
+	if !opts.Force && m.cachedUnchanged(rel, target, e) {
+		return AddResult{Path: rel}, nil
+	}
+
 	existing, size, err := repofs.FileSHA256(target)
 	if err == nil && existing == e.sha256 {
 		if size != e.size {
