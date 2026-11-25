@@ -11,6 +11,7 @@ import (
 
 	"go.vitalvas.com/gokit/xflags"
 	"go.vitalvas.com/repomgr/internal/debrepo"
+	"go.vitalvas.com/repomgr/internal/rpmrepo"
 )
 
 type debConfig struct {
@@ -28,6 +29,62 @@ type addConfig struct {
 }
 
 type buildConfig struct{}
+
+type rpmConfig struct {
+	Workdir string `long:"workdir" required:"true" description:"repository working directory"`
+}
+
+type rpmHandlers struct {
+	cfg *rpmConfig
+}
+
+func (h *rpmHandlers) init(ctx context.Context, _ *xflags.Command, cfg *initConfig, args []string) error {
+	if len(args) != 0 {
+		return errors.New("init takes no positional arguments")
+	}
+
+	return rpmrepo.Init(ctx, h.cfg.Workdir, cfg.Name, cfg.Email)
+}
+
+type rpmAddConfig struct {
+	Release   string `long:"release" required:"true" description:"release number, 8 or higher"`
+	Component string `long:"component" required:"true" description:"component name"`
+}
+
+func (h *rpmHandlers) add(ctx context.Context, _ *xflags.Command, cfg *rpmAddConfig, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("add requires exactly one .rpm file, got %d", len(args))
+	}
+
+	res, err := rpmrepo.Add(h.cfg.Workdir, cfg.Release, cfg.Component, args[0])
+	if err != nil {
+		return err
+	}
+
+	if res.Added {
+		slog.InfoContext(ctx, "added", "path", path.Join("public", res.Path))
+	} else {
+		slog.InfoContext(ctx, "unchanged", "path", path.Join("public", res.Path))
+	}
+
+	return nil
+}
+
+func (h *rpmHandlers) build(ctx context.Context, _ *xflags.Command, _ *buildConfig, args []string) error {
+	if len(args) != 0 {
+		return errors.New("build takes no positional arguments")
+	}
+
+	// Build returns summaries with ErrUploadRejected after publishing, so the
+	// built lines are logged before the error is returned.
+	summaries, err := rpmrepo.Build(ctx, h.cfg.Workdir, time.Now())
+
+	for _, s := range summaries {
+		slog.InfoContext(ctx, "built", "release", s.Release, "component", s.Component, "packages", s.Packages, "arches", s.Arches)
+	}
+
+	return err
+}
 
 type debHandlers struct {
 	cfg *debConfig
@@ -159,7 +216,13 @@ func New(version string) (*xflags.Parser, error) {
 
 	_, mirrorCmd, mirrorErr := xflags.BindCommand("deb-mirror", "mirror an upstream deb repository", mirror)
 
-	err := errors.Join(debErr, initErr, addErr, buildErr, mirrorErr)
+	rpmCfg, rpm, rpmErr := xflags.BindCommand[rpmConfig]("rpm", "manage an rpm repository", nil)
+	rh := &rpmHandlers{cfg: rpmCfg}
+	_, rpmInitCmd, rpmInitErr := xflags.BindCommand("init", "initialize the workdir", rh.init)
+	_, rpmAddCmd, rpmAddErr := xflags.BindCommand("add", "add a package to the pool", rh.add)
+	_, rpmBuildCmd, rpmBuildErr := xflags.BindCommand("build", "build repository metadata", rh.build)
+
+	err := errors.Join(debErr, initErr, addErr, buildErr, mirrorErr, rpmErr, rpmInitErr, rpmAddErr, rpmBuildErr)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +234,14 @@ func New(version string) (*xflags.Parser, error) {
 		deb.AddCommand(addCmd),
 		deb.AddCommand(buildCmd),
 		p.AddCommand(deb),
+		rpm.Validate("workdir", nonEmpty),
+		rpmInitCmd.Validate("name", nonEmpty),
+		rpmAddCmd.Validate("release", nonEmpty),
+		rpmAddCmd.Validate("component", nonEmpty),
+		rpm.AddCommand(rpmInitCmd),
+		rpm.AddCommand(rpmAddCmd),
+		rpm.AddCommand(rpmBuildCmd),
+		p.AddCommand(rpm),
 		mirrorCmd.Validate("workdir", nonEmpty),
 		mirrorCmd.Validate("source-repo", nonEmpty),
 		mirrorCmd.Validate("source-suite", nonEmpty),

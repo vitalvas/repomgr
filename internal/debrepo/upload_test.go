@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,98 +28,6 @@ func debBytes(t testing.TB, control string) []byte {
 	require.NoError(t, err)
 
 	return data
-}
-
-func TestMoveUploadSwappedForSymlink(t *testing.T) {
-	workdir := newWorkdir(t)
-	data := debBytes(t, ctl("foo", "1.0", ""))
-	file := uploadDeb(t, workdir, "stable/main/x.deb", data)
-	uploadDir := filepath.Join(workdir, "upload")
-
-	entries, err := os.ReadDir(filepath.Dir(file))
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-
-	outside := filepath.Join(t.TempDir(), "outside.deb")
-	require.NoError(t, os.WriteFile(outside, data, 0o600))
-	require.NoError(t, os.Remove(file))
-	require.NoError(t, os.Symlink(outside, file))
-
-	root, err := os.OpenRoot(uploadDir)
-	require.NoError(t, err)
-	t.Cleanup(func() { root.Close() })
-
-	err = moveUpload(t.Context(), workdir, root, file, entries[0])
-	require.Error(t, err)
-
-	info, err := os.Stat(outside)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
-
-	after, err := os.ReadFile(outside)
-	require.NoError(t, err)
-	assert.Equal(t, data, after)
-
-	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
-
-	link, err := os.Lstat(file)
-	require.NoError(t, err)
-	assert.NotZero(t, link.Mode()&os.ModeSymlink)
-}
-
-func TestMoveUploadParentSwappedForSymlink(t *testing.T) {
-	workdir := newWorkdir(t)
-	data := debBytes(t, ctl("foo", "1.0", ""))
-	file := uploadDeb(t, workdir, "stable/main/x.deb", data)
-	uploadDir := filepath.Join(workdir, "upload")
-	componentDir := filepath.Dir(file)
-
-	entries, err := os.ReadDir(componentDir)
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-
-	outsideDir := t.TempDir()
-	outside := filepath.Join(outsideDir, "x.deb")
-	require.NoError(t, os.WriteFile(outside, data, 0o600))
-	require.NoError(t, os.RemoveAll(componentDir))
-	require.NoError(t, os.Symlink(outsideDir, componentDir))
-
-	root, err := os.OpenRoot(uploadDir)
-	require.NoError(t, err)
-	t.Cleanup(func() { root.Close() })
-
-	err = moveUpload(t.Context(), workdir, root, file, entries[0])
-	require.Error(t, err)
-
-	after, err := os.ReadFile(outside)
-	require.NoError(t, err)
-	assert.Equal(t, data, after)
-
-	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
-}
-
-func TestMoveUploadSwappedForFIFO(t *testing.T) {
-	workdir := newWorkdir(t)
-	file := uploadDeb(t, workdir, "stable/main/x.deb", debBytes(t, ctl("foo", "1.0", "")))
-	uploadDir := filepath.Join(workdir, "upload")
-
-	entries, err := os.ReadDir(filepath.Dir(file))
-	require.NoError(t, err)
-	require.Len(t, entries, 1)
-
-	require.NoError(t, os.Remove(file))
-	require.NoError(t, syscall.Mkfifo(file, 0o600))
-
-	root, err := os.OpenRoot(uploadDir)
-	require.NoError(t, err)
-	t.Cleanup(func() { root.Close() })
-
-	err = moveUpload(t.Context(), workdir, root, file, entries[0])
-	require.ErrorContains(t, err, "not a regular file")
-
-	_, err = os.Lstat(file)
-	require.NoError(t, err)
-	assert.NoDirExists(t, filepath.Join(workdir, "public", "pool"))
 }
 
 func TestBuildUploads(t *testing.T) {

@@ -2,8 +2,6 @@ package debrepo
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.vitalvas.com/repomgr/internal/debfile"
 	"go.vitalvas.com/repomgr/internal/debtest"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
 // templateWorkdir is an initialized workdir created once per test binary.
@@ -159,7 +158,7 @@ func TestAdd(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, got)
 
-		cache, err := loadCache(workdir)
+		cache, err := repofs.LoadCache[cacheEntry](workdir)
 		require.NoError(t, err)
 		assert.Equal(t, hexSum(want), cache[res.Path].SHA256)
 		assertNoTemp(t, filepath.Dir(target), 1)
@@ -374,42 +373,6 @@ func TestAddGlobMetaWorkdir(t *testing.T) {
 
 	_, err = Add(workdir, "b", "main", writeDeb(t, ctl("foo", "1.0", "Description: x\n")), false)
 	require.ErrorIs(t, err, ErrConflict)
-}
-
-func TestCopyVerified(t *testing.T) {
-	src := writeDeb(t, ctl("foo", "1.0", ""))
-
-	data, err := os.ReadFile(src)
-	require.NoError(t, err)
-
-	sum := sha256.Sum256(data)
-	want := hex.EncodeToString(sum[:])
-
-	t.Run("matching hash is written", func(t *testing.T) {
-		target := filepath.Join(t.TempDir(), "a", "foo.deb")
-
-		require.NoError(t, copyVerified(src, target, want))
-
-		got, err := os.ReadFile(target)
-		require.NoError(t, err)
-		assert.Equal(t, data, got)
-	})
-
-	t.Run("changed input is not renamed", func(t *testing.T) {
-		dir := t.TempDir()
-		target := filepath.Join(dir, "foo.deb")
-
-		err := copyVerified(src, target, "deadbeef")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "changed during the add")
-		assert.NoFileExists(t, target)
-		assertNoTemp(t, dir, 0)
-	})
-
-	t.Run("missing source", func(t *testing.T) {
-		err := copyVerified(filepath.Join(t.TempDir(), "none.deb"), filepath.Join(t.TempDir(), "foo.deb"), want)
-		assert.ErrorIs(t, err, os.ErrNotExist)
-	})
 }
 
 func assertNoTemp(t *testing.T, dir string, wantFiles int) {

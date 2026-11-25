@@ -23,6 +23,8 @@ import (
 	"go.vitalvas.com/repomgr/internal/debrepo"
 	"go.vitalvas.com/repomgr/internal/debtest"
 	"go.vitalvas.com/repomgr/internal/pgpsign"
+	"go.vitalvas.com/repomgr/internal/repofs"
+	"go.vitalvas.com/repomgr/internal/rpmtest"
 )
 
 func run(t *testing.T, args ...string) error {
@@ -441,6 +443,126 @@ func TestEmptyRequiredOptions(t *testing.T) {
 	err = run(t, "deb", "--workdir", dir, "init", "--name=", "--email", "repo@example.com")
 	require.ErrorContains(t, err, "--name")
 	assert.NoDirExists(t, filepath.Join(dir, "config"))
+}
+
+func TestRpmInit(t *testing.T) {
+	t.Run("creates key files", func(t *testing.T) {
+		dir := t.TempDir()
+
+		require.NoError(t, run(t, "rpm", "--workdir", dir, "init", "--name", "Repo"))
+		assert.FileExists(t, filepath.Join(dir, "config", "signing.asc"))
+		assert.FileExists(t, filepath.Join(dir, "public", "key.asc"))
+	})
+
+	t.Run("missing name fails", func(t *testing.T) {
+		assert.Error(t, run(t, "rpm", "--workdir", t.TempDir(), "init"))
+	})
+
+	t.Run("missing workdir fails", func(t *testing.T) {
+		assert.Error(t, run(t, "rpm", "init", "--name", "Repo"))
+	})
+
+	t.Run("positional arguments fail", func(t *testing.T) {
+		require.ErrorContains(t, run(t, "rpm", "--workdir", t.TempDir(), "init", "--name", "Repo", "extra"), "init takes no positional arguments")
+	})
+}
+
+func TestRpmAdd(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, run(t, "rpm", "--workdir", dir, "init", "--name", "Repo"))
+
+	data, err := rpmtest.Build(rpmtest.Package{
+		Name:    "pdns",
+		Version: "5.1.0",
+		Release: "1.el9",
+		Arch:    "x86_64",
+	})
+	require.NoError(t, err)
+
+	file := filepath.Join(t.TempDir(), "test.rpm")
+	require.NoError(t, os.WriteFile(file, data, 0o600))
+
+	base := []string{"rpm", "--workdir", dir, "add"}
+
+	t.Run("adds then reports unchanged", func(t *testing.T) {
+		logs := captureLogs(t)
+		args := append(slices.Clone(base), "--release", "9", "--component", "main", file)
+
+		require.NoError(t, run(t, args...))
+		assert.FileExists(t, filepath.Join(dir, "public", "pool", "9", "main", "p", "pdns", "x86_64", "pdns-5.1.0-1.el9.x86_64.rpm"))
+		assert.Contains(t, logs.String(), "added")
+
+		require.NoError(t, run(t, args...))
+		assert.Contains(t, logs.String(), "unchanged")
+	})
+
+	failures := map[string][]string{
+		"missing release":   {"--component", "main", file},
+		"missing component": {"--release", "9", file},
+		"empty release":     {"--release=", "--component", "main", file},
+		"no file":           {"--release", "9", "--component", "main"},
+		"two files":         {"--release", "9", "--component", "main", file, file},
+		"invalid release":   {"--release", "7", "--component", "main", file},
+	}
+
+	for name, args := range failures {
+		t.Run(name, func(t *testing.T) {
+			assert.Error(t, run(t, append(slices.Clone(base), args...)...))
+		})
+	}
+}
+
+func TestRpmBuild(t *testing.T) {
+	t.Run("add then build", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, run(t, "rpm", "--workdir", dir, "init", "--name", "Repo"))
+
+		data, err := rpmtest.Build(rpmtest.Package{
+			Name:    "pdns",
+			Version: "5.1.0",
+			Release: "1.el9",
+			Arch:    "x86_64",
+		})
+		require.NoError(t, err)
+
+		file := filepath.Join(t.TempDir(), "test.rpm")
+		require.NoError(t, os.WriteFile(file, data, 0o600))
+		require.NoError(t, run(t, "rpm", "--workdir", dir, "add", "--release", "9", "--component", "main", file))
+
+		logs := captureLogs(t)
+
+		require.NoError(t, run(t, "rpm", "--workdir", dir, "build"))
+		assert.FileExists(t, filepath.Join(dir, "public", "x86_64", "9", "main", "repodata", "repomd.xml"))
+		assert.Contains(t, logs.String(), "msg=built release=9 component=main packages=1 arches=[x86_64]\n")
+	})
+
+	t.Run("rejected upload logs built and fails", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, run(t, "rpm", "--workdir", dir, "init", "--name", "Repo"))
+
+		data, err := rpmtest.Build(rpmtest.Package{Name: "pdns", Version: "5.1.0", Release: "1.el9", Arch: "x86_64"})
+		require.NoError(t, err)
+
+		for name, content := range map[string][]byte{"pdns.rpm": data, "broken.rpm": []byte("not an rpm")} {
+			file := filepath.Join(dir, "upload", "9", "main", name)
+			require.NoError(t, os.MkdirAll(filepath.Dir(file), 0o755))
+			require.NoError(t, os.WriteFile(file, content, 0o600))
+		}
+
+		logs := captureLogs(t)
+
+		err = run(t, "rpm", "--workdir", dir, "build")
+		require.ErrorIs(t, err, repofs.ErrUploadRejected)
+		assert.Contains(t, logs.String(), "msg=built release=9 component=main packages=1")
+	})
+
+	t.Run("positional arguments fail", func(t *testing.T) {
+		require.ErrorContains(t, run(t, "rpm", "--workdir", t.TempDir(), "build", "extra"), "build takes no positional arguments")
+	})
+
+	t.Run("uninitialized fails", func(t *testing.T) {
+		assert.Error(t, run(t, "rpm", "--workdir", t.TempDir(), "build"))
+	})
 }
 
 func TestDebInit(t *testing.T) {

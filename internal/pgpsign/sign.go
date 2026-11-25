@@ -55,14 +55,14 @@ func PublicKey(privateKey []byte) ([]byte, error) {
 // Verify checks that both signatures in signed are valid for message under the
 // binary public key, and that the clearsigned text is exactly message.
 func Verify(public, message []byte, signed Signed) error {
+	err := VerifyDetached(public, message, signed.Detached)
+	if err != nil {
+		return err
+	}
+
 	keyring, err := openpgp.ReadKeyRing(bytes.NewReader(public))
 	if err != nil {
 		return fmt.Errorf("read public key: %w", err)
-	}
-
-	_, err = openpgp.CheckArmoredDetachedSignature(keyring, bytes.NewReader(message), bytes.NewReader(signed.Detached), nil)
-	if err != nil {
-		return fmt.Errorf("verify detached signature: %w", err)
 	}
 
 	plaintext, err := verifyClear(keyring, signed.Clear)
@@ -72,6 +72,22 @@ func Verify(public, message []byte, signed Signed) error {
 
 	if !bytes.Equal(plaintext, message) {
 		return errClearPlaintext
+	}
+
+	return nil
+}
+
+// VerifyDetached checks that the armored detached signature is valid for
+// message under the binary public key.
+func VerifyDetached(public, message, detached []byte) error {
+	keyring, err := openpgp.ReadKeyRing(bytes.NewReader(public))
+	if err != nil {
+		return fmt.Errorf("read public key: %w", err)
+	}
+
+	_, err = openpgp.CheckArmoredDetachedSignature(keyring, bytes.NewReader(message), bytes.NewReader(detached), nil)
+	if err != nil {
+		return fmt.Errorf("verify detached signature: %w", err)
 	}
 
 	return nil

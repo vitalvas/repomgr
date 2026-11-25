@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.vitalvas.com/repomgr/internal/debfile"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
 func cachePath(workdir string) string {
@@ -86,7 +87,7 @@ func TestCache(t *testing.T) {
 		fake := orig
 		fake.SHA256 = "fake"
 		entries[res.Path] = fake
-		require.NoError(t, saveCache(workdir, entries))
+		require.NoError(t, repofs.SaveCache(workdir, entries))
 
 		logs := captureLogs(t)
 		_, err = Build(t.Context(), workdir, buildTime)
@@ -123,7 +124,7 @@ func TestCache(t *testing.T) {
 		old := orig
 		old.Fields = map[string]string{"Package": "foo", "Version": "1.0", "Architecture": "amd64"}
 		entries[res.Path] = old
-		require.NoError(t, saveCache(workdir, entries))
+		require.NoError(t, repofs.SaveCache(workdir, entries))
 
 		logs := captureLogs(t)
 		_, err = Build(t.Context(), workdir, buildTime)
@@ -196,12 +197,12 @@ func BenchmarkLoadCache(b *testing.B) {
 	workdir := b.TempDir()
 	entries := map[string]cacheEntry{"pool/a.deb": {Size: 1, Fields: map[string]string{"package": "a"}}}
 
-	require.NoError(b, saveCache(workdir, entries))
+	require.NoError(b, repofs.SaveCache(workdir, entries))
 
 	b.ReportAllocs()
 
 	for b.Loop() {
-		_, err := loadCache(workdir)
+		_, err := repofs.LoadCache[cacheEntry](workdir)
 		require.NoError(b, err)
 	}
 }
@@ -216,7 +217,7 @@ func FuzzLoadCache(f *testing.F) {
 		require.NoError(t, os.MkdirAll(filepath.Dir(cachePath(workdir)), 0o755))
 		require.NoError(t, os.WriteFile(cachePath(workdir), data, 0o644))
 
-		entries, err := loadCache(workdir)
+		entries, err := repofs.LoadCache[cacheEntry](workdir)
 		require.NoError(t, err)
 		assert.NotNil(t, entries)
 	})

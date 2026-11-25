@@ -28,6 +28,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"go.vitalvas.com/repomgr/internal/debfile"
 	"go.vitalvas.com/repomgr/internal/pgpsign"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
 var ErrMirrorFailed = errors.New("some packages failed to mirror")
@@ -196,7 +197,12 @@ type mirrorEntry struct {
 // Mirror downloads the packages listed in the source Packages indexes into
 // the pool. A package that fails any check is counted and skipped.
 func Mirror(ctx context.Context, workdir string, opts MirrorOptions) (MirrorResult, error) {
-	err := checkInitialized(workdir, "mirror")
+	err := repofs.CheckInitialized(workdir, "mirror")
+	if err != nil {
+		return MirrorResult{}, err
+	}
+
+	err = repofs.RefuseMarkers(workdir, "mirror", rpmMarkers, ErrRPMWorkdir)
 	if err != nil {
 		return MirrorResult{}, err
 	}
@@ -660,7 +666,7 @@ func saveMirrorState(workdir, key string, date time.Time) error {
 		return fmt.Errorf("encode mirror state: %w", err)
 	}
 
-	return writeAtomic(filepath.Join(workdir, "cache", "mirror-state.json"), bytes.NewReader(data), 0o644, nil)
+	return repofs.WriteAtomic(filepath.Join(workdir, "cache", "mirror-state.json"), bytes.NewReader(data), 0o644, nil)
 }
 
 func parseReleaseHashes(field string) (map[string]releaseFile, error) {
@@ -847,7 +853,7 @@ func mirrorPackage(ctx context.Context, workdir string, repo *url.URL, opts Mirr
 	}
 
 	target := filepath.Join(workdir, "public", filepath.FromSlash(rel))
-	existing, size, err := fileSHA256(target)
+	existing, size, err := repofs.FileSHA256(target)
 	if err == nil && existing == e.sha256 {
 		if size != e.size {
 			return AddResult{}, fmt.Errorf("%s: size mismatch with index", rel)

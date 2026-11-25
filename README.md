@@ -1,12 +1,17 @@
 # repomgr
 
-`repomgr` builds and signs APT repositories of `.deb` packages. It is a single
-static binary that never runs external commands, so it works in a distroless
-image. Repositories it builds work on Debian 10 and Ubuntu 20.04 or newer.
+`repomgr` builds and signs APT repositories of `.deb` packages and rpm-md
+repositories of `.rpm` packages. It is a single static binary that never runs
+external commands, so it works in a distroless image. Deb repositories work on
+Debian 10 and Ubuntu 20.04 or newer. RPM repositories work on RHEL 8 or newer
+and compatible releases.
 
 ## Commands
 
 Every command takes `--workdir`, the directory that holds the repository.
+
+The deb commands come first. The `repomgr rpm` commands are in
+[RPM repositories](#rpm-repositories).
 
 ### Initialize a workdir
 
@@ -298,14 +303,193 @@ Signed-By:
 Ubuntu 20.04 and Debian 10 and 11 don't accept an embedded key. Use the keyring
 file there.
 
+## RPM repositories
+
+`repomgr rpm` builds an rpm-md repository from its own workdir. Packages sit in
+one shared pool, and the metadata for each release and component points into
+it. A workdir holds one format, so `rpm` and `deb` never share one.
+
+### Initialize an rpm workdir
+
+```shell
+repomgr rpm --workdir /srv/rpm-repo init --name "Example Repo" --email repo@example.com
+```
+
+`init` generates the same kind of signing key as `deb init` and stores it in
+`config/signing.asc`. It writes the public half to `public/key.asc` in ASCII
+armor. It also creates the empty `public/x86_64/` and `public/aarch64/`
+directories, which mark the workdir as an rpm workdir. `--email` is optional.
+Running `init` again on the same workdir fails.
+
+Each side refuses the other's workdir. `rpm` commands fail on a workdir with
+`public/dists/` or `public/key.gpg`, and `deb` commands fail on one with
+`public/x86_64/` or `public/aarch64/`.
+
+### Add an rpm package
+
+```shell
+repomgr rpm --workdir /srv/rpm-repo add --release 9 --component auth-51 ./pdns-5.1.0-1.el9.x86_64.rpm
+```
+
+`add` reads the package header and ignores the input file name. It copies the
+file to its pool path:
+
+```text
+pool/<release>/<component>/<prefix>/<name>/<arch>/<NAME>-<VERSION>-<RELEASE>.<ARCH>.rpm
+```
+
+`<name>` is the name part of the source RPM file name. `<prefix>` is the first
+letter of `<name>` in lowercase, or `lib` plus the next letter for names that
+start with `lib`. The epoch isn't part of the file name.
+
+- `--release` is a whole number of 8 or more, without leading zeros.
+- `--component` matches `^[a-z0-9][a-z0-9_-]*$`.
+- Supported architectures are `x86_64`, `aarch64`, and `noarch`.
+
+`add` rejects a source RPM and a package without a source RPM tag. It also
+rejects a header that repeats a tag, has an inconsistent layout, or goes over
+the limits `rpm` itself enforces: 32 entries and 8 KiB for the signature
+header, 65535 entries and just under 256 MiB for the main header. The signature
+header must carry a SHA-256 or SHA-1 digest of the main header, and every
+digest it carries must match. Packages built with older `rpm` versions carry
+only SHA-1. When the package has a payload digest, `add` streams the payload
+once and checks it.
+A truncated or edited file fails.
+
+`repomgr` never re-signs a package. It stores the bytes you give it.
+
+Adding the same bytes again does nothing. Adding different bytes under a file
+name that already exists anywhere in the pool fails.
+
+### Build the rpm metadata
+
+```shell
+repomgr rpm --workdir /srv/rpm-repo build
+```
+
+`build` writes one repository for each base architecture (`x86_64` and
+`aarch64`), release, and component, under
+`public/<basearch>/<release>/<component>/repodata/`. A `noarch` package goes
+into both base architectures and exists once in the pool. A base architecture
+with only `noarch` packages still gets a repository.
+
+Each `repodata/` holds:
+
+- `primary.xml.gz`, `filelists.xml.gz`, and `other.xml.gz`, named
+  `<sha256>-<type>.xml.gz`.
+- `repomd.xml`, which lists them.
+- `repomd.xml.asc`, the armored detached signature of `repomd.xml`, made with
+  SHA-256.
+
+`build` renders and signs everything in memory before it writes anything, and
+writes `repomd.xml` last. It only writes files whose content changed. A build
+with no changes writes nothing. `revision` and the timestamps in `repomd.xml`
+keep the time of the build that last changed the repository.
+
+Each `repodata/` keeps the metadata files of the two previous generations, so a
+client that holds an older `repomd.xml` can finish its download. `build` also
+removes the release and component directories that no longer have packages for
+that base architecture. It never removes `public/x86_64/` or
+`public/aarch64/`, and it never touches other files in `public/`, such as the
+`.repo` files you publish for clients.
+
+`build` restores `public/key.asc` from `config/signing.asc` when it's missing
+or differs. It caches parsed packages in `cache/index.json` and only re-reads
+files whose size or modification time changed. You can delete `cache/` at any
+time.
+
+`build` fails without touching `repodata/` if a pool file isn't at the path its
+header gives, or if two files share a name but differ in content. It also
+refuses a package whose text the metadata can't hold. That covers control
+characters in a text field and text that isn't valid UTF-8 after a Latin-1
+conversion. `add` refuses such a package up front.
+
+For the same packages, the metadata holds the same values as the reference
+rpm-md writer's output. Only the XML escaping can differ, and clients parse
+both forms to the same values.
+
+### RPM upload inbox
+
+The inbox works like the deb [Upload inbox](#upload-inbox). Drop packages into
+`upload/<release>/<component>/` and run `build`:
+
+```shell
+cp pdns-5.1.0-1.el9.x86_64.rpm /srv/rpm-repo/upload/9/auth-51/
+repomgr rpm --workdir /srv/rpm-repo build
+```
+
+`build` checks every `*.rpm` directly inside an `upload/<release>/<component>/`
+directory the same way `add` does. It moves a valid package into the pool,
+deletes a duplicate, and leaves a failed package in `upload/` with an error
+line. The rules for symlinks, dot files, and partial uploads are the same as for
+deb. After it publishes everything else, `build` exits with status 1 if it
+rejected any upload.
+
+### RPM workdir layout
+
+```text
+<workdir>/
+  config/
+    signing.asc     private signing key, mode 0600
+  cache/
+    index.json      parsed package cache
+  upload/
+    <release>/<component>/
+                    packages waiting for the next build
+  public/
+    key.asc         ASCII-armored public key for gpgkey=
+    <name>.repo     your own dnf repo files, never touched
+    pool/           packages
+    x86_64/<release>/<component>/repodata/
+    aarch64/<release>/<component>/repodata/
+                    metadata and signatures
+```
+
+Publish `public/` and keep `config/` and `upload/` private.
+
+### Use the repository with dnf
+
+Add a repo file on the client, for example `/etc/yum.repos.d/example-auth-51.repo`:
+
+```text
+[example-auth-51]
+name=Example auth-51
+baseurl=https://repo.example.com/$basearch/$releasever/auth-51
+gpgkey=https://repo.example.com/key.asc
+repo_gpgcheck=1
+enabled=1
+```
+
+`$basearch` and `$releasever` match the directories under `public/`, and the
+last path part is the component. `repo_gpgcheck=1` checks the signature on
+`repomd.xml`, which covers every package through the checksums in the metadata.
+Packages that carry a vendor signature can also use `gpgcheck=1` with the
+vendor key listed in `gpgkey=`.
+
+On RHEL 8, modular filtering hides a package from this repository when an
+enabled module stream ships a package of the same name. `repomgr` doesn't write
+`modules.yaml`.
+
 ## Logging
 
 Each command logs to stderr with `log/slog`. Every change gets an info line
 with a workdir-relative `path`:
 
-- `init` logs `created` for each file it writes.
-- `add` logs `added` or `unchanged`.
-- `build` logs:
+- `init` logs `created` for each file it writes. `rpm init` does the same.
+- `add` logs `added` or `unchanged`. `rpm add` does the same.
+- `rpm build` logs:
+  - `moved` or `removed duplicate` for each upload, with the upload `path` and
+    the pool `target`, or an error line `upload rejected` with the reason;
+  - `parsed` for each package it reads;
+  - `cache dropped` for each package that left the pool;
+  - `created` or `updated` for `public/key.asc` when it restores the key;
+  - `added` for each new metadata file, `updated` for `repomd.xml` and
+    `repomd.xml.asc`, and `removed` for each metadata file that retention
+    drops;
+  - `removed stale` for each release or component directory it deletes;
+  - one `built` line per release and component, with the package count and the
+    base architectures.
+- `deb build` logs:
   - `moved` or `removed duplicate` for each upload, with the upload `path` and
     the pool `target`, or an error line `upload rejected` with the reason;
   - `parsed` for each package it reads;

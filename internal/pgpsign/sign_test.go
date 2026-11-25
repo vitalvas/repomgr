@@ -170,6 +170,45 @@ func TestVerify(t *testing.T) {
 	}
 }
 
+func TestVerifyDetached(t *testing.T) {
+	key, err := GenerateKey("Repo Signer", "repo@example.com")
+	require.NoError(t, err)
+
+	other, err := GenerateKey("Other", "other@example.com")
+	require.NoError(t, err)
+
+	message := []byte(sampleRelease)
+
+	signed, err := Sign(key.Private, message)
+	require.NoError(t, err)
+
+	changed := bytes.Clone(message)
+	changed[0] ^= 1
+
+	cases := map[string]struct {
+		public   []byte
+		message  []byte
+		detached []byte
+		wantErr  bool
+	}{
+		"valid":           {key.Public, message, signed.Detached, false},
+		"wrong key":       {other.Public, message, signed.Detached, true},
+		"changed message": {key.Public, changed, signed.Detached, true},
+		"garbage":         {key.Public, message, []byte("garbage"), true},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := VerifyDetached(tc.public, tc.message, tc.detached)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
 func TestVerifyClear(t *testing.T) {
 	key, err := GenerateKey("Repo Signer", "repo@example.com")
 	require.NoError(t, err)

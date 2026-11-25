@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -25,6 +24,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"go.vitalvas.com/repomgr/internal/debfile"
 	"go.vitalvas.com/repomgr/internal/pgpsign"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
 const indexVariants int = 3
@@ -73,6 +73,11 @@ type outputFile struct {
 }
 
 func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, error) {
+	err := repofs.RefuseMarkers(workdir, "build", rpmMarkers, ErrRPMWorkdir)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg, err := loadRepoConfig(filepath.Join(workdir, "config", "repo.yaml"))
 	if err != nil {
 		return nil, err
@@ -99,14 +104,25 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		return nil, err
 	}
 
-	rejected, err := processUploads(ctx, workdir)
+	rejected, err := repofs.ProcessUploads(ctx, workdir, repofs.Upload{
+		Ext:    ".deb",
+		Layout: "upload/<suite>/<component>/<file>.deb",
+		Add: func(suite, component, file string) (repofs.UploadResult, error) {
+			res, err := Add(workdir, suite, component, file, false)
+			if err != nil {
+				return repofs.UploadResult{}, err
+			}
+
+			return repofs.UploadResult{Path: res.Path, Added: res.Added}, nil
+		},
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	public := filepath.Join(workdir, "public")
 
-	cache, err := loadCache(workdir)
+	cache, err := repofs.LoadCache[cacheEntry](workdir)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +132,7 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		return nil, err
 	}
 
-	err = saveCache(workdir, fresh)
+	err = repofs.SaveCache(workdir, fresh)
 	if err != nil {
 		return nil, err
 	}
@@ -290,11 +306,11 @@ func publishFiles(ctx context.Context, workdir string, files []outputFile, creat
 			return fmt.Errorf("read %s: %w", f.path, err)
 		}
 
-		if err := writeAtomic(f.path, bytes.NewReader(f.data), 0o644, nil); err != nil {
+		if err := repofs.WriteAtomic(f.path, bytes.NewReader(f.data), 0o644, nil); err != nil {
 			return err
 		}
 
-		slog.InfoContext(ctx, message, "path", logPath(workdir, f.path))
+		slog.InfoContext(ctx, message, "path", repofs.LogPath(workdir, f.path))
 	}
 
 	return nil
@@ -366,7 +382,7 @@ func pruneByHash(ctx context.Context, workdir string, current []outputFile, now 
 				return fmt.Errorf("remove %s: %w", u.path, err)
 			}
 
-			slog.InfoContext(ctx, "removed by-hash", "path", logPath(workdir, u.path))
+			slog.InfoContext(ctx, "removed by-hash", "path", repofs.LogPath(workdir, u.path))
 		}
 	}
 
@@ -418,7 +434,7 @@ func sweep(ctx context.Context, workdir, dir string, depth int, keep map[string]
 				return fmt.Errorf("remove %s: %w", sub, err)
 			}
 
-			slog.InfoContext(ctx, "removed stale", "path", logPath(workdir, sub))
+			slog.InfoContext(ctx, "removed stale", "path", repofs.LogPath(workdir, sub))
 
 			continue
 		}
@@ -434,15 +450,6 @@ func sweep(ctx context.Context, workdir, dir string, depth int, keep map[string]
 	return nil
 }
 
-func logPath(workdir, file string) string {
-	rel, err := filepath.Rel(workdir, file)
-	if err != nil {
-		return filepath.ToSlash(file)
-	}
-
-	return filepath.ToSlash(rel)
-}
-
 func compareKeys(a, b indexKey) int {
 	return strings.Compare(fmt.Sprintf("%s/%s/%s", a.suite, a.component, a.arch), fmt.Sprintf("%s/%s/%s", b.suite, b.component, b.arch))
 }
@@ -453,7 +460,7 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 	fresh := make(map[string]cacheEntry)
 	seenSums := make(map[string]sumSeen)
 
-	err := walkPool(pool, func(file string, d fs.DirEntry, err error) error {
+	err := repofs.WalkPool(pool, func(file string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -536,23 +543,6 @@ func scanPool(ctx context.Context, workdir string, cache map[string]cacheEntry) 
 	}
 
 	return indexes, fresh, nil
-}
-
-func walkPool(pool string, visit fs.WalkDirFunc) error {
-	info, err := os.Lstat(pool)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", pool, err)
-	}
-
-	if !info.IsDir() {
-		return fmt.Errorf("pool %s is not a directory", pool)
-	}
-
-	return filepath.WalkDir(pool, visit)
 }
 
 func stanza(raw, filename string, pkg debfile.Package) string {
@@ -723,51 +713,4 @@ func gzipBytes(data []byte) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
-}
-
-// writeAtomic writes r to target through a temp file and a rename. A non-nil
-// verify runs after the data is written and before the rename; a failure
-// removes the temp file and leaves target untouched.
-func writeAtomic(target string, r io.Reader, mode fs.FileMode, verify func() error) error {
-	dir := filepath.Dir(target)
-
-	err := os.MkdirAll(dir, 0o755)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
-	}
-
-	tmp, err := os.CreateTemp(dir, ".build-*")
-	if err != nil {
-		return fmt.Errorf("create temp in %s: %w", dir, err)
-	}
-
-	_, err = io.Copy(tmp, r)
-	if err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
-
-		return fmt.Errorf("write %s: %w", tmp.Name(), err)
-	}
-
-	err = tmp.Close()
-
-	if err == nil && verify != nil {
-		err = verify()
-	}
-
-	if err == nil {
-		err = os.Chmod(tmp.Name(), mode)
-	}
-
-	if err == nil {
-		err = os.Rename(tmp.Name(), target)
-	}
-
-	if err != nil {
-		os.Remove(tmp.Name())
-
-		return fmt.Errorf("write %s: %w", target, err)
-	}
-
-	return nil
 }

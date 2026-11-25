@@ -5,11 +5,34 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.vitalvas.com/repomgr/internal/pgpsign"
+	"go.vitalvas.com/repomgr/internal/rpmrepo"
 )
+
+func TestRPMWorkdirRefused(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, rpmrepo.Init(t.Context(), workdir, "Test", ""))
+
+	_, addErr := Add(workdir, "stable", "main", "x.deb", false)
+	_, buildErr := Build(t.Context(), workdir, time.Now())
+	_, mirrorErr := Mirror(t.Context(), workdir, MirrorOptions{})
+
+	for name, err := range map[string]error{"add": addErr, "build": buildErr, "mirror": mirrorErr} {
+		require.ErrorIs(t, err, ErrRPMWorkdir, name)
+	}
+
+	assert.NoDirExists(t, filepath.Join(workdir, "public", "dists"))
+	assert.NoFileExists(t, filepath.Join(workdir, "public", "key.gpg"))
+
+	other := t.TempDir()
+	require.NoError(t, rpmrepo.Init(t.Context(), other, "Test", ""))
+	require.ErrorIs(t, Init(t.Context(), other, "Test", ""), ErrRPMWorkdir)
+	assert.NoFileExists(t, filepath.Join(other, "public", "key.gpg"))
+}
 
 func TestInit(t *testing.T) {
 	t.Run("creates layout and keys", func(t *testing.T) {

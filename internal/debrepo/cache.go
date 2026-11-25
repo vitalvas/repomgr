@@ -1,14 +1,9 @@
 package debrepo
 
 import (
-	"bytes"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 
 	"go.vitalvas.com/repomgr/internal/debfile"
 )
@@ -68,36 +63,4 @@ func (e cacheEntry) pkg() debfile.Package {
 		SHA1:    e.SHA1,
 		SHA256:  e.SHA256,
 	}
-}
-
-func loadCache(workdir string) (map[string]cacheEntry, error) {
-	file := filepath.Join(workdir, "cache", "index.json")
-
-	data, err := os.ReadFile(file)
-	if errors.Is(err, os.ErrNotExist) {
-		return map[string]cacheEntry{}, nil
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", file, err)
-	}
-
-	var entries map[string]cacheEntry
-
-	err = json.Unmarshal(data, &entries)
-	if err != nil || entries == nil {
-		return map[string]cacheEntry{}, nil
-	}
-
-	return entries, nil
-}
-
-func saveCache(workdir string, entries map[string]cacheEntry) error {
-	data, err := json.Marshal(entries)
-	if err != nil {
-		return fmt.Errorf("encode cache: %w", err)
-	}
-
-	// ponytail: concurrent add/build on one workdir are not coordinated and can lose cache entries, a lock file is the upgrade path.
-	return writeAtomic(filepath.Join(workdir, "cache", "index.json"), bytes.NewReader(data), 0o644, nil)
 }

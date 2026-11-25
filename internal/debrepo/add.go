@@ -1,12 +1,8 @@
 package debrepo
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,15 +10,15 @@ import (
 	"strings"
 
 	"go.vitalvas.com/repomgr/internal/debfile"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
 var (
-	ErrNotInitialized = errors.New("workdir not initialized")
-	ErrInvalidName    = errors.New("invalid name")
-	ErrConflict       = errors.New("conflicting package already exists")
+	ErrNotInitialized = repofs.ErrNotInitialized
+	ErrInvalidName    = repofs.ErrInvalidName
+	ErrConflict       = repofs.ErrConflict
 	ErrMisplaced      = errors.New("package not at its pool path")
 
-	nameRe   = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 	sourceRe = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+$`)
 )
 
@@ -37,24 +33,13 @@ type placementOptions struct {
 	expected map[string]string
 }
 
-// checkInitialized returns ErrNotInitialized when workdir has no signing key; op names the caller in the message.
-func checkInitialized(workdir, op string) error {
-	keyPath := filepath.Join(workdir, "config", "signing.asc")
-
-	_, err := os.Stat(keyPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("%s to %s: %w", op, workdir, ErrNotInitialized)
-	}
-
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", keyPath, err)
-	}
-
-	return nil
-}
-
 func Add(workdir, suite, component, debPath string, replace bool) (AddResult, error) {
-	err := checkInitialized(workdir, "add")
+	err := repofs.CheckInitialized(workdir, "add")
+	if err != nil {
+		return AddResult{}, err
+	}
+
+	err = repofs.RefuseMarkers(workdir, "add", rpmMarkers, ErrRPMWorkdir)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -72,7 +57,7 @@ func addPackage(workdir, suite, component, debPath string, opts placementOptions
 		return AddResult{Path: p.rel, Added: false}, nil
 	}
 
-	cache, err := loadCache(workdir)
+	cache, err := repofs.LoadCache[cacheEntry](workdir)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -97,7 +82,7 @@ func addPackage(workdir, suite, component, debPath string, opts placementOptions
 		}()
 	}
 
-	err = copyVerified(debPath, p.target, p.pkg.SHA256)
+	err = repofs.CopyVerified(debPath, p.target, p.pkg.SHA256)
 	if err != nil {
 		return AddResult{}, err
 	}
@@ -164,12 +149,12 @@ func placePackage(workdir, suite, component, debPath string, opts placementOptio
 
 	poolDir := filepath.Join(workdir, "public", "pool")
 
-	err = checkPoolConflicts(poolDir, path.Base(rel), pkg.SHA256, skip)
+	err = repofs.CheckPoolConflicts(poolDir, path.Base(rel), pkg.SHA256, skip)
 	if err != nil {
 		return placement{}, fmt.Errorf("add %s: %w", debPath, err)
 	}
 
-	existing, _, err := fileSHA256(p.target)
+	existing, _, err := repofs.FileSHA256(p.target)
 	if err == nil {
 		if existing != pkg.SHA256 && !opts.replace {
 			return placement{}, fmt.Errorf("add %s: %w", p.target, ErrConflict)
@@ -202,31 +187,6 @@ func checkIndexControl(actual, expected map[string]string) error {
 	return nil
 }
 
-// checkPoolConflicts fails on a same-named file with other bytes; skip, when
-// not empty, is a path that is exempt from the check.
-func checkPoolConflicts(poolDir, filename, wantSHA256, skip string) error {
-	return walkPool(poolDir, func(file string, entry fs.DirEntry, err error) error {
-		if err != nil || entry.IsDir() || entry.Name() != filename || file == skip {
-			return err
-		}
-
-		if !entry.Type().IsRegular() {
-			return fmt.Errorf("package %s is not a regular file", file)
-		}
-
-		sum, _, err := fileSHA256(file)
-		if err != nil {
-			return fmt.Errorf("hash %s: %w", file, err)
-		}
-
-		if sum != wantSHA256 {
-			return fmt.Errorf("different content at %s: %w", file, ErrConflict)
-		}
-
-		return nil
-	})
-}
-
 func cacheAddedPackage(workdir, target, rel string, pkg debfile.Package, cache map[string]cacheEntry) error {
 	info, err := os.Stat(target)
 	if err != nil {
@@ -235,19 +195,16 @@ func cacheAddedPackage(workdir, target, rel string, pkg debfile.Package, cache m
 
 	cache[rel] = newCacheEntry(info, pkg)
 
-	return saveCache(workdir, cache)
+	return repofs.SaveCache(workdir, cache)
 }
 
 func checkNames(suite, component string) error {
-	if !nameRe.MatchString(suite) {
-		return fmt.Errorf("%w: suite %q", ErrInvalidName, suite)
+	err := repofs.CheckName("suite", suite)
+	if err != nil {
+		return err
 	}
 
-	if !nameRe.MatchString(component) {
-		return fmt.Errorf("%w: component %q", ErrInvalidName, component)
-	}
-
-	return nil
+	return repofs.CheckName("component", component)
 }
 
 func poolPath(suite, component string, fields map[string]string) (string, error) {
@@ -290,48 +247,4 @@ func sourcePackage(fields map[string]string) string {
 	}
 
 	return fields["package"]
-}
-
-func fileSHA256(file string) (string, int64, error) {
-	info, err := os.Lstat(file)
-	if err != nil {
-		return "", 0, err
-	}
-
-	if !info.Mode().IsRegular() {
-		return "", 0, fmt.Errorf("%s is not a regular file", file)
-	}
-
-	f, err := os.Open(file)
-	if err != nil {
-		return "", 0, err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-
-	n, err := io.Copy(h, f)
-	if err != nil {
-		return "", 0, err
-	}
-
-	return hex.EncodeToString(h.Sum(nil)), n, nil
-}
-
-func copyVerified(src, target, wantSHA256 string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", src, err)
-	}
-	defer in.Close()
-
-	h := sha256.New()
-
-	return writeAtomic(target, io.TeeReader(in, h), 0o644, func() error {
-		if hex.EncodeToString(h.Sum(nil)) != wantSHA256 {
-			return fmt.Errorf("%s changed during the add", src)
-		}
-
-		return nil
-	})
 }

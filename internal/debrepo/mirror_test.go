@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.vitalvas.com/repomgr/internal/pgpsign"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
 const (
@@ -191,7 +192,7 @@ func TestMirror(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, barDeb, got)
 
-		cache, err := loadCache(workdir)
+		cache, err := repofs.LoadCache[cacheEntry](workdir)
 		require.NoError(t, err)
 		assert.Contains(t, cache, poolFoo)
 		assert.Contains(t, cache, poolBar)
@@ -453,7 +454,7 @@ func TestMirrorForce(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, fooDeb, got)
 
-		cache, err := loadCache(workdir)
+		cache, err := repofs.LoadCache[cacheEntry](workdir)
 		require.NoError(t, err)
 		assert.Equal(t, hexSum(fooDeb), cache[poolFoo].SHA256)
 
