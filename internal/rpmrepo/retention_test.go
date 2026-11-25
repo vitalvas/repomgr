@@ -2,6 +2,7 @@ package rpmrepo
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -218,12 +219,19 @@ func TestRetention(t *testing.T) {
 			gz, err := os.ReadFile(filepath.Join(env.repoDir, d.Location.Href))
 			require.NoError(t, err)
 
-			other := append(bytes.Clone(gz), 0)
-			sum := hexSHA256(other)
+			var other bytes.Buffer
+			zw := gzip.NewWriter(&other)
+			zw.Name = fmt.Sprintf("%s.xml", d.Type)
+			_, err = zw.Write(gunzip(t, gz))
+			require.NoError(t, err)
+			require.NoError(t, zw.Close())
+
+			sum := hexSHA256(other.Bytes())
 			name := fmt.Sprintf("%s-%s.xml.gz", sum, d.Type)
 
-			require.NoError(t, os.WriteFile(filepath.Join(env.repodata, name), other, 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(env.repodata, name), other.Bytes(), 0o644))
 
+			md.Data[i].Size = other.Len()
 			md.Data[i].Checksum.Value = sum
 			md.Data[i].Location.Href = path.Join("repodata", name)
 		}

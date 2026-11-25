@@ -13,18 +13,20 @@ import (
 
 const (
 	introSize       int    = 16
-	entrySize       int    = 16
+	entrySize              = 16
 	typeNull        uint32 = 0
 	typeInt8        uint32 = 2
 	typeInt16       uint32 = 3
 	typeInt32       uint32 = 4
 	typeInt64       uint32 = 5
 	typeString      uint32 = 6
+	typeBin         uint32 = 7
 	typeStringArray uint32 = 8
 	typeI18NString  uint32 = 9
 	maxType         uint32 = 9
 
 	tagRegionFirst uint32 = 61
+	tagSigRegion   uint32 = 62
 	tagRegionLast  uint32 = 63
 )
 
@@ -38,6 +40,11 @@ type entry struct {
 	typ    uint32
 	offset int
 	count  int
+}
+
+type headerRegion struct {
+	entries int
+	trailer int
 }
 
 type header struct {
@@ -92,6 +99,11 @@ func readHeader(r io.Reader, name string, lim headerLimit) (header, error) {
 		return header{}, fmt.Errorf("read %s header data: %w", name, io.ErrUnexpectedEOF)
 	}
 
+	region, err := readRegion(raw, data, name == "main")
+	if err != nil {
+		return header{}, fmt.Errorf("%s header: %w", name, err)
+	}
+
 	entries := make(map[uint32]entry, count)
 
 	var end int64
@@ -117,15 +129,26 @@ func readHeader(r io.Reader, name string, lim headerLimit) (header, error) {
 		}
 
 		ent := entry{typ: typ, offset: int(offset), count: int(n)}
+		entries[tag] = ent
+		if i == 0 && region.entries != 0 {
+			continue
+		}
 
-		region := i == 0 && tag >= tagRegionFirst && tag <= tagRegionLast
+		section := data
+		switch {
+		case i < region.entries:
+			section = data[:region.trailer]
+			if ent.offset >= len(section) {
+				return header{}, fmt.Errorf("%s header tag %d starts outside the region data", name, tag)
+			}
+		case i == region.entries && region.entries != 0:
+			end = int64(region.trailer + entrySize)
+		}
 
-		end, err = checkEntry(ent, region, end, data)
+		end, err = checkEntry(ent, end, section)
 		if err != nil {
 			return header{}, fmt.Errorf("%s header tag %d %w", name, tag, err)
 		}
-
-		entries[tag] = ent
 	}
 
 	return header{
@@ -137,21 +160,56 @@ func readHeader(r io.Reader, name string, lim headerLimit) (header, error) {
 	}, nil
 }
 
+// readRegion validates the trailer of a header that has a region. The main
+// header's region spans the whole header. A signature header can have entries
+// added after its region, and older signatures can use a tag 61 trailer.
+func readRegion(raw, data []byte, exact bool) (headerRegion, error) {
+	if len(raw) == 0 {
+		return headerRegion{}, errors.New("no tags")
+	}
+
+	tag := binary.BigEndian.Uint32(raw)
+	if tag < tagRegionFirst || tag > tagRegionLast {
+		return headerRegion{}, nil
+	}
+
+	trailer := int64(binary.BigEndian.Uint32(raw[8:]))
+	if trailer+entrySize > int64(len(data)) {
+		return headerRegion{}, errors.New("region trailer is outside the header data")
+	}
+
+	if binary.BigEndian.Uint32(raw[4:]) != typeBin || binary.BigEndian.Uint32(raw[12:]) != entrySize {
+		return headerRegion{}, errors.New("invalid region tag type or count")
+	}
+
+	t := data[trailer : trailer+entrySize]
+	trailerTag := binary.BigEndian.Uint32(t)
+	if tag == tagSigRegion && trailerTag == tagRegionFirst {
+		trailerTag = tag
+	}
+
+	if trailerTag != tag || binary.BigEndian.Uint32(t[4:]) != typeBin || binary.BigEndian.Uint32(t[12:]) != entrySize {
+		return headerRegion{}, errors.New("invalid region trailer tag, type, or count")
+	}
+
+	indexSize := -int64(int32(binary.BigEndian.Uint32(t[8:])))
+	if indexSize < entrySize || indexSize > int64(len(raw)) || indexSize%entrySize != 0 {
+		return headerRegion{}, errors.New("invalid region trailer index size")
+	}
+
+	if exact && (indexSize != int64(len(raw)) || trailer+entrySize != int64(len(data))) {
+		return headerRegion{}, errors.New("region does not cover the main header")
+	}
+
+	return headerRegion{entries: int(indexSize) / entrySize, trailer: int(trailer)}, nil
+}
+
 // checkEntry applies rpm 4.14.3's layout rule, given the end of the previous
 // entry's data: data may not overlap or go backwards, 16-, 32- and 64-bit
 // values are aligned to their size, and every entry has data that lies inside
-// the data section. A region entry (the first entry with a region tag) is only
-// checked against the end of the data. It returns the end of this entry.
-func checkEntry(e entry, region bool, end int64, data []byte) (int64, error) {
+// the data section. It returns the end of this entry.
+func checkEntry(e entry, end int64, data []byte) (int64, error) {
 	rest := data[e.offset:]
-
-	if region {
-		if int64(e.count)*int64(elementSize[e.typ]) > int64(len(rest)) {
-			return 0, fmt.Errorf("has data outside the %d bytes of data", len(data))
-		}
-
-		return end, nil
-	}
 
 	if int64(e.offset) < end {
 		return 0, errors.New("has data overlapping or before the previous entry")

@@ -1,6 +1,6 @@
 # RPM repositories
 
-RPM repositories work on RHEL 8 or newer and compatible releases.
+DNF clients on RHEL 8 or newer and compatible releases can use these repositories.
 
 `repomgr rpm` builds an RPM repository from its own workdir. Packages sit in
 one shared pool, and the metadata for each release and component points into
@@ -13,9 +13,10 @@ repomgr rpm --workdir /srv/rpm-repo init --name "Example Repo" --email repo@exam
 ```
 
 `init` generates the signing key, an OpenPGP v4 Ed25519 key with no
-passphrase, and stores it in `config/signing.asc`. It writes the public half to `public/key.asc` in ASCII
-armor. It also creates the empty `public/x86_64/` and `public/aarch64/`
-directories, which mark the workdir as an rpm workdir. `--email` is optional.
+passphrase, and stores it in `config/signing.asc`. It writes the public half
+to `public/key.asc` in ASCII armor. The empty `public/x86_64/` and
+`public/aarch64/` directories mark the workdir as an RPM workdir.
+`--email` is optional.
 Running `init` again on the same workdir fails.
 
 Each side refuses the other's workdir. `rpm` commands fail on a workdir with
@@ -35,23 +36,26 @@ file to its pool path:
 pool/<release>/<component>/<prefix>/<name>/<arch>/<NAME>-<VERSION>-<RELEASE>.<ARCH>.rpm
 ```
 
-`<name>` is the name part of the source RPM file name. `<prefix>` is the first
-letter of `<name>` in lowercase, or `lib` plus the next letter for names that
-start with `lib`. The epoch isn't part of the file name.
+`<name>` is the name part of the source RPM file name. `<prefix>` is the
+first character of the lowercased name, or its first four characters when
+it starts with `lib` and has a fourth character. The epoch is omitted from
+the file name.
 
 - `--release` is a whole number of 8 or more, without leading zeros.
 - `--component` matches `^[a-z0-9][a-z0-9_-]*$`.
 - Supported architectures are `x86_64`, `aarch64`, and `noarch`.
 
 `add` rejects a source RPM and a package without a source RPM tag. It also
-rejects a header that repeats a tag, has an inconsistent layout, or goes over
-the limits `rpm` itself enforces: 32 entries and 8 KiB for the signature
-header, 65535 entries and just under 256 MiB for the main header. The signature
-header must carry a SHA-256 or SHA-1 digest of the main header, and every
-digest it carries must match. Packages built with older `rpm` versions carry
-only SHA-1. When the package has a payload digest, `add` streams the payload
-once and checks it.
-A truncated or edited file fails.
+rejects headers with repeated tags or an inconsistent layout. Input RPMs
+must fit the RPM 4.14 limits of 32 entries and 8 KiB for the signature header
+and 65,535 entries and just under 256 MiB for the main header. This excludes
+some newer RPMs with larger signature headers.
+
+The signature header must carry a SHA-256 or SHA-1 digest of the main header,
+and every header digest it carries must match. Older RPMs may carry only
+SHA-1. When the package has a payload digest, `add` checks it while streaming
+the payload. For packages without this digest, the integrity check covers
+the main header.
 
 `repomgr` never re-signs a package. It stores the bytes you give it.
 
@@ -101,8 +105,8 @@ refuses a package whose text the metadata can't hold. That covers control
 characters in a text field and text that isn't valid UTF-8 after a Latin-1
 conversion. `add` refuses such a package up front.
 
-Only the XML escaping can differ from the metadata other tools write, and
-clients read both forms the same way.
+The generated XML uses the standard RPM metadata namespaces and can be read
+by `dnf`.
 
 ## Upload inbox
 
@@ -164,14 +168,15 @@ name=Example auth-51
 baseurl=https://repo.example.com/$basearch/$releasever/auth-51
 gpgkey=https://repo.example.com/key.asc
 repo_gpgcheck=1
+gpgcheck=0
 enabled=1
 ```
 
 `$basearch` and `$releasever` match the directories under `public/`, and the
 last path part is the component. `repo_gpgcheck=1` checks the signature on
 `repomd.xml`, which covers every package through the checksums in the metadata.
-Packages that carry a vendor signature can also use `gpgcheck=1` with the
-vendor key listed in `gpgkey=`.
+To require package signatures as well, set `gpgcheck=1` and list the vendor
+key alongside the repository key in `gpgkey=`.
 
 On RHEL 8, modular filtering hides a package from this repository when an
 enabled module stream ships a package of the same name. `repomgr` doesn't write

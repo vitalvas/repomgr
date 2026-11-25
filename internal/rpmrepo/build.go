@@ -79,9 +79,10 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]Summary, error
 		return nil, err
 	}
 
-	err = repofs.SaveCache(workdir, fresh)
-	if err != nil {
-		return nil, err
+	if !maps.EqualFunc(cache, fresh, cacheEntry.equal) {
+		if err := repofs.SaveCache(workdir, fresh); err != nil {
+			return nil, err
+		}
 	}
 
 	for _, name := range slices.Sorted(maps.Keys(cache)) {
@@ -126,16 +127,16 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]Summary, error
 
 			summary.Arches = append(summary.Arches, arch)
 
-			repoDir := filepath.Join(workdir, "public", arch, key.release, key.component)
+			repoPath := filepath.Join("public", arch, key.release, key.component)
+			if err := checkDirs(workdir, filepath.Join(repoPath, "repodata")); err != nil {
+				return nil, err
+			}
+
+			repoDir := filepath.Join(workdir, repoPath)
 			keep[filepath.Dir(repoDir)] = true
 			keep[repoDir] = true
 
-			if repoCurrent(repoDir, md, publicKey) {
-				published, err := readRepomd(repoDir)
-				if err != nil {
-					return nil, err
-				}
-
+			if published, ok := repoCurrent(repoDir, md, publicKey); ok {
 				prunes = append(prunes, pruneTarget{workdir: workdir, repoDir: repoDir, referenced: published})
 
 				continue
@@ -226,8 +227,8 @@ func loadSigningKeys(workdir string) (signingKeys, error) {
 }
 
 // publishPair writes repomd.xml.asc and repomd.xml, in that order, to temporary
-// files first and renames them only when both are complete. A failure before
-// the renames leaves the published pair as it was.
+// files first and renames them only when both are complete. If the second
+// rename fails, it restores the previous signature.
 func publishPair(ctx context.Context, workdir string, pair []outputFile) error {
 	tmps := make([]string, 0, len(pair))
 
@@ -238,48 +239,95 @@ func publishPair(ctx context.Context, workdir string, pair []outputFile) error {
 	}()
 
 	for _, f := range pair {
-		dir := filepath.Dir(f.name)
-
-		err := os.MkdirAll(dir, 0o755)
-		if err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
+		info, err := os.Lstat(f.name)
+		switch {
+		case err == nil && info.IsDir():
+			return fmt.Errorf("write %s: destination is a directory", f.name)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return fmt.Errorf("stat %s: %w", f.name, err)
 		}
 
-		tmp, err := os.CreateTemp(dir, ".build-*")
+		tmp, err := stageOutput(f.name, f.data)
 		if err != nil {
-			return fmt.Errorf("create temp in %s: %w", dir, err)
+			return err
 		}
 
-		tmps = append(tmps, tmp.Name())
-
-		_, err = tmp.Write(f.data)
-		if err != nil {
-			tmp.Close()
-
-			return fmt.Errorf("write %s: %w", tmp.Name(), err)
-		}
-
-		err = tmp.Close()
-		if err != nil {
-			return fmt.Errorf("write %s: %w", tmp.Name(), err)
-		}
-
-		err = os.Chmod(tmp.Name(), 0o644)
-		if err != nil {
-			return fmt.Errorf("write %s: %w", f.name, err)
-		}
+		tmps = append(tmps, tmp)
 	}
 
-	for i, f := range pair {
-		err := os.Rename(tmps[i], f.name)
-		if err != nil {
-			return fmt.Errorf("write %s: %w", f.name, err)
+	sig, md := pair[0].name, pair[1].name
+	backup, err := stageSignatureBackup(sig)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		if backup != "" {
+			os.Remove(backup)
+		}
+	}()
+
+	if err := os.Rename(tmps[0], sig); err != nil {
+		return fmt.Errorf("write %s: %w", sig, err)
+	}
+
+	if err := os.Rename(tmps[1], md); err != nil {
+		err = fmt.Errorf("write %s: %w", md, err)
+		var restoreErr error
+		if backup == "" {
+			restoreErr = os.Remove(sig)
+		} else {
+			restoreErr = os.Rename(backup, sig)
 		}
 
+		if restoreErr != nil {
+			if backup != "" {
+				err = errors.Join(err, fmt.Errorf("previous signature retained at %s", backup))
+				backup = ""
+			}
+			return errors.Join(err, fmt.Errorf("restore %s: %w", sig, restoreErr))
+		}
+		return err
+	}
+
+	for _, f := range pair {
 		slog.InfoContext(ctx, f.msg, "path", repofs.LogPath(workdir, f.name))
 	}
 
 	return nil
+}
+
+func stageSignatureBackup(sig string) (string, error) {
+	current, err := readRegular(sig)
+	switch {
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, errNotRegular):
+		return "", nil
+	case err != nil:
+		return "", fmt.Errorf("read %s: %w", sig, err)
+	}
+
+	return stageOutput(sig, current)
+}
+
+func stageOutput(target string, data []byte) (string, error) {
+	dir := filepath.Dir(target)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("create %s: %w", dir, err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".build-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp in %s: %w", dir, err)
+	}
+
+	_, writeErr := tmp.Write(data)
+	err = errors.Join(writeErr, tmp.Chmod(0o644), tmp.Close())
+	if err != nil {
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("write %s: %w", target, err)
+	}
+
+	return tmp.Name(), nil
 }
 
 // restoreKey writes public/key.asc when it is missing or differs from armored.
@@ -287,14 +335,14 @@ func restoreKey(ctx context.Context, workdir string, armored []byte) error {
 	keyPath := filepath.Join(workdir, "public", "key.asc")
 	msg := msgUpdated
 
-	current, err := os.ReadFile(keyPath)
+	current, err := readRegular(keyPath)
 
 	switch {
 	case err == nil && bytes.Equal(current, armored):
 		return nil
 	case errors.Is(err, fs.ErrNotExist):
 		msg = msgCreated
-	case err != nil:
+	case err != nil && !errors.Is(err, errNotRegular):
 		return fmt.Errorf("read %s: %w", keyPath, err)
 	}
 

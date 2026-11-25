@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	cacheVersion int = 2
+	cacheVersion int = 3
 	sha256Len    int = 64
 )
 
@@ -24,6 +24,11 @@ type cacheEntry struct {
 	Size    int64  `json:"size"`
 	MTime   int64  `json:"mtime"`
 	Package []byte `json:"package"`
+}
+
+func (e cacheEntry) equal(other cacheEntry) bool {
+	return e.Version == other.Version && e.Size == other.Size && e.MTime == other.MTime &&
+		bytes.Equal(e.Package, other.Package)
 }
 
 func newCacheEntry(info os.FileInfo, pkg rpmfile.Package) (cacheEntry, error) {

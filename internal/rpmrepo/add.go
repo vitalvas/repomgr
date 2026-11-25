@@ -82,7 +82,13 @@ func Add(workdir, release, component, rpmPath string) (AddResult, error) {
 	}
 
 	rel := poolPath(release, component, pkg)
-	target := filepath.Join(workdir, "public", filepath.FromSlash(rel))
+	dst := filepath.Join("public", filepath.FromSlash(rel))
+	target := filepath.Join(workdir, dst)
+
+	err = checkDirs(workdir, filepath.Dir(dst))
+	if err != nil {
+		return AddResult{}, err
+	}
 
 	err = repofs.CheckPoolConflicts(filepath.Join(workdir, "public", "pool"), pkg.FileName(), pkg.SHA256, "")
 	if err != nil {
@@ -124,10 +130,16 @@ func saveCacheEntry(workdir, rel string, pkg rpmfile.Package) error {
 		return err
 	}
 
-	cache[rel], err = newCacheEntry(info, pkg)
+	entry, err := newCacheEntry(info, pkg)
 	if err != nil {
 		return fmt.Errorf("cache %s: %w", rel, err)
 	}
+
+	if cache[rel].equal(entry) {
+		return nil
+	}
+
+	cache[rel] = entry
 
 	return repofs.SaveCache(workdir, cache)
 }

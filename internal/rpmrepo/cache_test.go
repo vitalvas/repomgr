@@ -79,7 +79,6 @@ func TestCacheEntryMatches(t *testing.T) {
 	entry, err := newCacheEntry(info, want)
 	require.NoError(t, err)
 	assert.Equal(t, cacheVersion, entry.Version)
-	assert.Equal(t, 2, cacheVersion)
 
 	got, ok := entry.matches(info)
 	assert.True(t, ok)

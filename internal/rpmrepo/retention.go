@@ -3,7 +3,6 @@ package rpmrepo
 import (
 	"cmp"
 	"context"
-	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,25 +26,6 @@ type pruneTarget struct {
 	workdir    string
 	repoDir    string
 	referenced repomd
-}
-
-// readRepomd parses the repomd.xml published in repoDir.
-func readRepomd(repoDir string) (repomd, error) {
-	file := filepath.Join(repoDir, "repodata", "repomd.xml")
-
-	data, err := os.ReadFile(file)
-	if err != nil {
-		return repomd{}, fmt.Errorf("read %s: %w", file, err)
-	}
-
-	var md repomd
-
-	err = xml.Unmarshal(data, &md)
-	if err != nil {
-		return repomd{}, fmt.Errorf("parse %s: %w", file, err)
-	}
-
-	return md, nil
 }
 
 type candidate struct {

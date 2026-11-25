@@ -543,6 +543,25 @@ func TestBuild(t *testing.T) {
 		assert.NoDirExists(t, filepath.Join(f.workdir, "public", "pool"))
 	})
 
+	t.Run("symlink in the metadata path", func(t *testing.T) {
+		for _, rel := range []string{"9", "9/main", "9/main/repodata"} {
+			t.Run(rel, func(t *testing.T) {
+				workdir := initWorkdir(t)
+				addPkg(t, workdir, "9/main", basePkg())
+				link := filepath.Join(workdir, "public", "x86_64", rel)
+				require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+				outside := t.TempDir()
+				require.NoError(t, os.Symlink(outside, link))
+
+				_, err := Build(t.Context(), workdir, buildTime)
+				require.ErrorContains(t, err, "is not a directory")
+				entries, err := os.ReadDir(outside)
+				require.NoError(t, err)
+				assert.Empty(t, entries)
+			})
+		}
+	})
+
 	t.Run("not initialized", func(t *testing.T) {
 		_, err := Build(t.Context(), t.TempDir(), buildTime)
 		require.ErrorIs(t, err, repofs.ErrNotInitialized)
@@ -842,13 +861,13 @@ func TestBuildCurrent(t *testing.T) {
 
 	t.Run("unchanged build writes nothing", func(t *testing.T) {
 		workdir, repoDir := setup(t)
-		before := mtimes(t, filepath.Join(workdir, "public"))
+		before := mtimes(t, workdir)
 		logs := captureLogs(t)
 
 		_, err := Build(t.Context(), workdir, later)
 		require.NoError(t, err)
 		assert.Empty(t, logs.String())
-		assert.Equal(t, before, mtimes(t, filepath.Join(workdir, "public")))
+		assert.Equal(t, before, mtimes(t, workdir))
 		assert.Equal(t, buildTime.Unix(), revision(t, repoDir))
 	})
 
@@ -1041,6 +1060,27 @@ func TestBuildCurrent(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, oldXML, newXML)
 
+		temps, err := filepath.Glob(filepath.Join(repodata, ".build-*"))
+		require.NoError(t, err)
+		assert.Empty(t, temps)
+	})
+
+	t.Run("blocked repomd.xml destination preserves the published signature", func(t *testing.T) {
+		workdir, repoDir := setup(t)
+		repodata := filepath.Join(repoDir, "repodata")
+		ascPath := filepath.Join(repodata, "repomd.xml.asc")
+		before, err := os.ReadFile(ascPath)
+		require.NoError(t, err)
+
+		xmlPath := filepath.Join(repodata, "repomd.xml")
+		require.NoError(t, os.Remove(xmlPath))
+		require.NoError(t, os.Mkdir(xmlPath, 0o755))
+
+		_, err = Build(t.Context(), workdir, later)
+		require.ErrorContains(t, err, xmlPath)
+		after, err := os.ReadFile(ascPath)
+		require.NoError(t, err)
+		assert.Equal(t, before, after)
 		temps, err := filepath.Glob(filepath.Join(repodata, ".build-*"))
 		require.NoError(t, err)
 		assert.Empty(t, temps)

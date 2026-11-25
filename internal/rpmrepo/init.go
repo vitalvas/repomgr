@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.vitalvas.com/repomgr/internal/pgpsign"
 	"go.vitalvas.com/repomgr/internal/repofs"
@@ -24,22 +25,32 @@ var (
 // stale-directory removal reach outside the workdir.
 func makeArchDirs(workdir string) error {
 	for _, arch := range baseArches {
-		dir := filepath.Join(workdir, "public", arch)
-
-		info, err := os.Lstat(dir)
-
-		switch {
-		case err == nil && !info.IsDir():
-			return fmt.Errorf("%s is not a directory", dir)
-		case err == nil:
-			continue
-		case !errors.Is(err, os.ErrNotExist):
-			return fmt.Errorf("stat %s: %w", dir, err)
+		err := checkDirs(workdir, filepath.Join("public", arch))
+		if err != nil {
+			return err
 		}
 
-		err = os.MkdirAll(dir, 0o755)
+		err = os.MkdirAll(filepath.Join(workdir, "public", arch), 0o755)
 		if err != nil {
 			return fmt.Errorf("create %s directory: %w", arch, err)
+		}
+	}
+
+	return nil
+}
+
+// checkDirs checks each existing directory below root, without following links.
+func checkDirs(root, rel string) error {
+	for part := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		root = filepath.Join(root, part)
+		info, err := os.Lstat(root)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return nil
+		case err != nil:
+			return fmt.Errorf("stat %s: %w", root, err)
+		case !info.IsDir():
+			return fmt.Errorf("%s is not a directory", root)
 		}
 	}
 
@@ -57,6 +68,10 @@ func Init(ctx context.Context, workdir, name, email string) error {
 		Name:    name,
 		Email:   email,
 		Publish: func(ctx context.Context, public []byte) error {
+			if err := makeArchDirs(workdir); err != nil {
+				return err
+			}
+
 			armored, err := pgpsign.ArmorPublicKey(public)
 			if err != nil {
 				return err
@@ -71,7 +86,7 @@ func Init(ctx context.Context, workdir, name, email string) error {
 
 			slog.InfoContext(ctx, "created", "path", repofs.LogPath(workdir, keyPath))
 
-			return makeArchDirs(workdir)
+			return nil
 		},
 	})
 }

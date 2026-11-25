@@ -3,6 +3,7 @@ package rpmrepo
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -86,6 +87,31 @@ func TestRepoCurrent(t *testing.T) {
 			md.Data = slices.Clone(rendered.Data[:2])
 			publishSigned(t, repodata, key, md)
 		}, false},
+		"signed incorrect size": {rendered, public, func(t *testing.T, repodata string) {
+			md := rendered
+			md.Data = slices.Clone(md.Data)
+			md.Data[0].Size++
+			publishSigned(t, repodata, key, md)
+		}, false},
+		"signed incorrect checksum type": {rendered, public, func(t *testing.T, repodata string) {
+			md := rendered
+			md.Data = slices.Clone(md.Data)
+			md.Data[0].Checksum.Type = "sha1"
+			publishSigned(t, repodata, key, md)
+		}, false},
+		"signed metadata points to different content": {rendered, public, func(t *testing.T, repodata string) {
+			md := rendered
+			md.Data = slices.Clone(md.Data)
+			d := &md.Data[0]
+			gz, err := gzipBytes(make([]byte, d.OpenSize))
+			require.NoError(t, err)
+			d.Checksum.Value = hexSHA256(gz)
+			d.Size = len(gz)
+			name := fmt.Sprintf("%s-%s.xml.gz", d.Checksum.Value, d.Type)
+			d.Location.Href = path.Join("repodata", name)
+			require.NoError(t, os.WriteFile(filepath.Join(repodata, name), gz, 0o644))
+			publishSigned(t, repodata, key, md)
+		}, false},
 	}
 
 	for i, typ := range []string{"primary", "filelists", "other"} {
@@ -129,7 +155,8 @@ func TestRepoCurrent(t *testing.T) {
 				tc.mutate(t, repodata)
 			}
 
-			assert.Equal(t, tc.want, repoCurrent(dir, tc.rendered, tc.public))
+			_, ok := repoCurrent(dir, tc.rendered, tc.public)
+			assert.Equal(t, tc.want, ok)
 		})
 	}
 }

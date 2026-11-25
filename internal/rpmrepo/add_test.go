@@ -85,10 +85,24 @@ func TestAdd(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, first.Added)
 
+		before := mtimes(t, filepath.Join(workdir, "cache"))
 		second, err := Add(workdir, "9", "main", file)
 		require.NoError(t, err)
 		assert.False(t, second.Added)
 		assert.Equal(t, first.Path, second.Path)
+		assert.Equal(t, before, mtimes(t, filepath.Join(workdir, "cache")))
+	})
+
+	t.Run("symlink in the pool path", func(t *testing.T) {
+		workdir := initWorkdir(t)
+		release := filepath.Join(workdir, "public", "pool", "9")
+		require.NoError(t, os.MkdirAll(release, 0o755))
+		outside := t.TempDir()
+		require.NoError(t, os.Symlink(outside, filepath.Join(release, "main")))
+
+		_, err := Add(workdir, "9", "main", writeRPM(t, basePkg()))
+		require.ErrorContains(t, err, "is not a directory")
+		assert.Empty(t, mtimes(t, outside))
 	})
 
 	t.Run("writes cache entry", func(t *testing.T) {

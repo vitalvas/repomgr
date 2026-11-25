@@ -26,6 +26,13 @@ func rawHeader(entries [][4]int32, data []byte) []byte {
 
 func TestReadHeader(t *testing.T) {
 	entry := [][4]int32{{1000, 6, 0, 1}}
+	region := func(tag, trailerTag, trailerIndexSize int32) []byte {
+		data := []byte("a\x00\x00\x00")
+		for _, value := range []int32{trailerTag, 7, trailerIndexSize, 16} {
+			data = binary.BigEndian.AppendUint32(data, uint32(value))
+		}
+		return rawHeader([][4]int32{{tag, 7, 4, 16}, {1000, 6, 0, 1}}, data)
+	}
 
 	tests := []struct {
 		name string
@@ -47,9 +54,15 @@ func TestReadHeader(t *testing.T) {
 		{"gap between entries", rawHeader([][4]int32{{1000, 6, 0, 1}, {1001, 6, 4, 1}}, []byte("a\x00\x00\x00b\x00")), ""},
 		{"aligned int16, int32, int64", rawHeader([][4]int32{{1000, 3, 0, 1}, {1001, 4, 4, 1}, {1002, 5, 8, 1}}, make([]byte, 16)), ""},
 		{"strings and bytes", rawHeader([][4]int32{{1000, 8, 0, 2}, {1001, 7, 4, 3}, {1002, 9, 7, 1}}, []byte("a\x00b\x00xyzi\x00")), ""},
-		{"region at entry 0 with its data at the end", rawHeader([][4]int32{{63, 7, 4, 16}, {1000, 6, 0, 1}}, append([]byte("a\x00\x00\x00"), make([]byte, 16)...)), ""},
-		{"region tag 62", rawHeader([][4]int32{{62, 7, 4, 16}, {1000, 6, 0, 1}}, append([]byte("a\x00\x00\x00"), make([]byte, 16)...)), ""},
-		{"region tag 61", rawHeader([][4]int32{{61, 7, 4, 16}, {1000, 6, 0, 1}}, append([]byte("a\x00\x00\x00"), make([]byte, 16)...)), ""},
+		{"immutable region", region(63, 63, -32), ""},
+		{"signature region", region(62, 62, -32), ""},
+		{"legacy signature region trailer", region(62, 61, -32), ""},
+		{"image region", region(61, 61, -32), ""},
+		{"wrong trailer tag", region(63, 0, -32), "invalid region trailer tag"},
+		{"trailer index size is not aligned", region(63, 63, -31), "invalid region trailer index size"},
+		{"trailer index size is too large", region(63, 63, -48), "invalid region trailer index size"},
+		{"main region has trailing entries", region(63, 63, -16), "region does not cover"},
+		{"data starts in the trailer", patched(region(63, 63, -32), 16+16+11, 4), "outside the region"},
 		{"region data past the data", rawHeader([][4]int32{{63, 7, 8, 16}, {1000, 6, 0, 1}}, append([]byte("a\x00\x00\x00"), make([]byte, 16)...)), "outside"},
 		{"region tag after entry 0 is walked", rawHeader([][4]int32{{1000, 6, 0, 1}, {63, 7, 0, 2}}, []byte("a\x00")), "overlap"},
 

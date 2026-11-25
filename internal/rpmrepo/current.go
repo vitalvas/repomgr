@@ -1,61 +1,106 @@
 package rpmrepo
 
 import (
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 
 	"go.vitalvas.com/repomgr/internal/pgpsign"
+	"go.vitalvas.com/repomgr/internal/repofs"
 )
 
-// repoCurrent reports whether the repository in dir already holds what rendered
-// describes: the published repomd.xml parses, its primary, filelists, and other
-// entries have the rendered open checksums, repomd.xml.asc verifies over it
-// with publicKey, and every file it lists exists.
-func repoCurrent(dir string, rendered repomd, publicKey []byte) bool {
+var errNotRegular = errors.New("not a regular file")
+
+// repoCurrent returns the verified repomd.xml when its metadata agrees with
+// the rendered repository.
+func repoCurrent(dir string, rendered repomd, publicKey []byte) (repomd, bool) {
 	repodata := filepath.Join(dir, "repodata")
 
-	data, err := os.ReadFile(filepath.Join(repodata, "repomd.xml"))
+	data, err := readRegular(filepath.Join(repodata, "repomd.xml"))
 	if err != nil {
-		return false
+		return repomd{}, false
 	}
 
 	// The signature comes first: the hrefs are only trusted once it verifies.
-	asc, err := os.ReadFile(filepath.Join(repodata, "repomd.xml.asc"))
+	asc, err := readRegular(filepath.Join(repodata, "repomd.xml.asc"))
 	if err != nil || pgpsign.VerifyDetached(publicKey, data, asc) != nil {
-		return false
+		return repomd{}, false
 	}
 
 	var published repomd
 
 	err = xml.Unmarshal(data, &published)
-	if err != nil || len(published.Data) != len(rendered.Data) {
-		return false
+	if err != nil || published.XMLName.Space != nsRepo || len(published.Data) != len(rendered.Data) {
+		return repomd{}, false
 	}
 
 	for i, d := range published.Data {
-		want := rendered.Data[i]
-		if d.Type != want.Type || d.OpenChecksum.Value != want.OpenChecksum.Value {
-			return false
-		}
-
-		if !isRegularWith(filepath.Join(dir, filepath.FromSlash(d.Location.Href)), d.Checksum.Value) {
-			return false
+		if !metadataCurrent(repodata, d, rendered.Data[i]) {
+			return repomd{}, false
 		}
 	}
 
-	return true
+	return published, true
 }
 
-// isRegularWith reports whether file is a regular file (not a link) whose
-// SHA-256 is sum.
-func isRegularWith(file, sum string) bool {
-	info, err := os.Lstat(file)
-	if err != nil || !info.Mode().IsRegular() {
+func metadataCurrent(repodata string, d, want repomdData) bool {
+	name := fmt.Sprintf("%s-%s.xml.gz", d.Checksum.Value, d.Type)
+	if d.Type != want.Type || d.OpenChecksum != want.OpenChecksum || d.OpenSize != want.OpenSize ||
+		d.Checksum.Type != want.Checksum.Type || !metadataName.MatchString(name) || d.Location.Href != path.Join("repodata", name) {
 		return false
 	}
 
-	data, err := os.ReadFile(file)
+	file := filepath.Join(repodata, name)
+	sum, size, err := repofs.FileSHA256(file)
+	if err != nil || sum != d.Checksum.Value || size != int64(d.Size) {
+		return false
+	}
 
-	return err == nil && hexSHA256(data) == sum
+	// A different gzip encoder can produce different compressed bytes.
+	return sum == want.Checksum.Value || matchesOpenChecksum(file, want)
+}
+
+func matchesOpenChecksum(file string, want repomdData) bool {
+	f, err := os.Open(file)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	r, err := gzip.NewReader(f)
+	if err != nil {
+		return false
+	}
+	defer r.Close()
+
+	sum := sha256.New()
+	n, err := io.Copy(sum, io.LimitReader(r, int64(want.OpenSize)+1))
+
+	return err == nil && n == int64(want.OpenSize) && hex.EncodeToString(sum.Sum(nil)) == want.OpenChecksum.Value
+}
+
+func readRegular(file string) ([]byte, error) {
+	info, err := os.Lstat(file)
+	if err != nil {
+		return nil, err
+	}
+
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s: %w", file, errNotRegular)
+	}
+
+	return os.ReadFile(file)
+}
+
+func isRegularWith(file, sum string) bool {
+	got, _, err := repofs.FileSHA256(file)
+
+	return err == nil && got == sum
 }

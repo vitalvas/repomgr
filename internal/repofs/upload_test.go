@@ -123,6 +123,28 @@ func TestProcessUploads(t *testing.T) {
 		assert.NotContains(t, logs.String(), "removed duplicate")
 	})
 
+	t.Run("a replacement stays in the inbox", func(t *testing.T) {
+		workdir := t.TempDir()
+		file := putUpload(t, workdir, "g/c/a.pkg")
+		replacement := filepath.Join(filepath.Dir(file), ".replacement")
+		require.NoError(t, os.WriteFile(replacement, []byte("replacement"), 0o600))
+		upload := (&stubAdd{}).upload()
+		upload.Add = func(_, _, snapshot string) (UploadResult, error) {
+			data, err := os.ReadFile(snapshot)
+			require.NoError(t, err)
+			assert.Equal(t, "payload", string(data))
+			require.NoError(t, os.Rename(replacement, file))
+			return UploadResult{Path: "pool/a.pkg", Added: true}, nil
+		}
+
+		rejected, err := ProcessUploads(t.Context(), workdir, upload)
+		require.NoError(t, err)
+		assert.Equal(t, 1, rejected)
+		data, err := os.ReadFile(file)
+		require.NoError(t, err)
+		assert.Equal(t, "replacement", string(data))
+	})
+
 	t.Run("duplicate upload is removed and logged", func(t *testing.T) {
 		workdir := t.TempDir()
 		file := putUpload(t, workdir, "g/c/a.pkg")

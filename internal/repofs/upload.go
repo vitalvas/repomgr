@@ -163,6 +163,15 @@ func moveUpload(ctx context.Context, u Upload, f uploadFile) error {
 		return err
 	}
 
+	current, err := f.root.Lstat(rel)
+	if err != nil {
+		return fmt.Errorf("stat upload before removal: %w", err)
+	}
+
+	if !os.SameFile(info, current) || info.Size() != current.Size() || !info.ModTime().Equal(current.ModTime()) {
+		return errors.New("upload changed while processing")
+	}
+
 	err = f.root.Remove(rel)
 	if err != nil {
 		return fmt.Errorf("remove upload: %w", err)
