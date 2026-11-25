@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/vitalvas/repomgr/compare/v0.7.0...v0.7.1) (2026-11-25)
+
+
+### Bug Fixes
+
+* skip rehashing unchanged mirror packages using the build cache ([53d8eeb](https://github.com/vitalvas/repomgr/commit/53d8eebb81aa571563b87c2a0a789f3db51a74a5))
+
 ## [0.7.0](https://github.com/vitalvas/repomgr/compare/v0.6.0...v0.7.0) (2026-11-25)
 
 
