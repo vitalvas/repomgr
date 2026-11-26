@@ -2,6 +2,7 @@ package debrepo
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,6 +105,105 @@ func TestBuildRepoConfig(t *testing.T) {
 		err := cfg.validate()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "suites.a.version")
+	})
+
+	t.Run("declared components and architectures publish empty indexes", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		writeRepoYAML(t, workdir, "suites:\n  trixie:\n    components: [stable, testing]\n    architectures: [amd64, arm64]\n")
+
+		summaries, err := Build(t.Context(), workdir, buildTime)
+		require.NoError(t, err)
+		require.Len(t, summaries, 1)
+		assert.Equal(t, []string{"amd64", "arm64"}, summaries[0].Architectures)
+		assert.Zero(t, summaries[0].Packages)
+
+		release := readPublic(t, workdir, "dists", "trixie", "Release")
+		assert.Contains(t, release, "Architectures: amd64 arm64\nComponents: stable testing\n")
+
+		for _, name := range []string{"InRelease", "Release.gpg"} {
+			assert.FileExists(t, filepath.Join(workdir, "public", "dists", "trixie", name))
+		}
+
+		for _, component := range []string{"stable", "testing"} {
+			for _, arch := range []string{"binary-amd64", "binary-arm64"} {
+				assert.Empty(t, readPublic(t, workdir, "dists", "trixie", component, arch, "Packages"))
+				assert.Contains(t, release, path.Join(component, arch, "Packages.gz"))
+			}
+		}
+
+		_, err = Build(t.Context(), workdir, buildTime)
+		require.NoError(t, err)
+		assert.FileExists(t, filepath.Join(workdir, "public", "dists", "trixie", "testing", "binary-arm64", "Packages"))
+	})
+
+	t.Run("declared indexes merge with pool packages", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		writeRepoYAML(t, workdir, "suites:\n  trixie:\n    components: [main]\n    architectures: [arm64]\n")
+		addPkg(t, workdir, "trixie", "main", ctl("foo", "1.0", ""))
+
+		_, err := Build(t.Context(), workdir, buildTime)
+		require.NoError(t, err)
+
+		assert.Contains(t, readPublic(t, workdir, "dists", "trixie", "main", "binary-amd64", "Packages"), "Package: foo\n")
+		assert.Empty(t, readPublic(t, workdir, "dists", "trixie", "main", "binary-arm64", "Packages"))
+		assert.Contains(t, readPublic(t, workdir, "dists", "trixie", "Release"), "Architectures: amd64 arm64\n")
+	})
+
+	t.Run("components or architectures alone combine with pool packages", func(t *testing.T) {
+		cases := map[string]struct {
+			yaml string
+			want []string
+		}{
+			"components only":    {"suites:\n  trixie:\n    components: [testing]\n", []string{"testing", "binary-amd64"}},
+			"architectures only": {"suites:\n  trixie:\n    architectures: [arm64]\n", []string{"main", "binary-arm64"}},
+			"neither":            {"suites:\n  trixie:\n    version: \"13\"\n", []string{"main", "binary-amd64"}},
+		}
+
+		for name, tc := range cases {
+			t.Run(name, func(t *testing.T) {
+				workdir := newWorkdir(t)
+				writeRepoYAML(t, workdir, tc.yaml)
+				addPkg(t, workdir, "trixie", "main", ctl("foo", "1.0", ""))
+
+				_, err := Build(t.Context(), workdir, buildTime)
+				require.NoError(t, err)
+
+				assert.Contains(t, readPublic(t, workdir, "dists", "trixie", "main", "binary-amd64", "Packages"), "Package: foo\n")
+				assert.FileExists(t, filepath.Join(workdir, "public", "dists", "trixie", tc.want[0], tc.want[1], "Packages"))
+			})
+		}
+	})
+
+	t.Run("components or architectures alone on an empty pool publish nothing", func(t *testing.T) {
+		workdir := newWorkdir(t)
+		writeRepoYAML(t, workdir, "suites:\n  trixie:\n    components: [main]\n")
+
+		_, err := Build(t.Context(), workdir, buildTime)
+		require.NoError(t, err)
+		assert.NoDirExists(t, filepath.Join(workdir, "public", "dists", "trixie"))
+	})
+
+	t.Run("invalid declared names fail before writing", func(t *testing.T) {
+		cases := map[string]struct {
+			yaml  string
+			field string
+		}{
+			"component":    {"suites:\n  s:\n    components: [Main]\n    architectures: [amd64]\n", "suites.s.components"},
+			"architecture": {"suites:\n  s:\n    components: [main]\n    architectures: [sparc]\n", "suites.s.architectures"},
+			"suite":        {"suites:\n  S:\n    components: [main]\n    architectures: [amd64]\n", "suites.S"},
+		}
+
+		for name, tc := range cases {
+			t.Run(name, func(t *testing.T) {
+				workdir := newWorkdir(t)
+				writeRepoYAML(t, workdir, tc.yaml)
+
+				_, err := Build(t.Context(), workdir, buildTime)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.field)
+				assert.NoDirExists(t, filepath.Join(workdir, "public", "dists"))
+			})
+		}
 	})
 
 	t.Run("empty suite name falls back to codename", func(t *testing.T) {

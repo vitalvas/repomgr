@@ -132,6 +132,8 @@ func Build(ctx context.Context, workdir string, now time.Time) ([]SuiteSummary, 
 		return nil, err
 	}
 
+	cfg.seedIndexes(indexes)
+
 	err = repofs.SaveCache(workdir, fresh)
 	if err != nil {
 		return nil, err
@@ -588,6 +590,10 @@ func stanza(raw, filename string, pkg debfile.Package) string {
 }
 
 func renderPackages(entries []indexEntry) []byte {
+	if len(entries) == 0 {
+		return []byte{}
+	}
+
 	slices.SortFunc(entries, func(a, b indexEntry) int {
 		if c := strings.Compare(a.name, b.name); c != 0 {
 			return c
